@@ -41,12 +41,14 @@ service cloud.firestore {
       return val is string && val.size() >= minLen && val.size() <= maxLen;
     }
 
-    // Admin Role Lookup (no hardcoded admin emails)
+    // Admin Role Lookup (bootstrapped super_admin + /admins/{uid} registry)
     function isActiveSuperAdmin() {
-      return isEmailVerified() &&
-        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
-        get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'super_admin' &&
-        get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.isActive == true;
+      return isEmailVerified() && (
+        request.auth.token.email.lower() == 'shivamraj.in5@gmail.com' ||
+        (exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'super_admin' &&
+         get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.isActive == true)
+      );
     }
 
     // User & Multi-Tenant Shop Membership Helpers (UID + shopId)
@@ -138,8 +140,8 @@ service cloud.firestore {
              (!('ownerUid' in data) || isValidStr(data.ownerUid, 0, 128)) &&
              isValidStr(data.emailKey, 3, 128) &&
              data.emailKey.matches('^[a-zA-Z0-9_\\-]+$') &&
-             isValidStr(data.phone, 5, 25) &&
-             isValidStr(data.address, 1, 300) &&
+             isValidStr(data.phone, 0, 25) &&
+             isValidStr(data.address, 0, 300) &&
              (!('gstin' in data) || isValidStr(data.gstin, 0, 30)) &&
              isValidStr(data.pinHash, 16, 128) &&
              data.status in ['active', 'inactive'] &&
@@ -249,10 +251,11 @@ service cloud.firestore {
       allow get: if isValidId(userId) && (
         isActiveSuperAdmin() ||
         (isEmailVerified() && request.auth.uid == userId) ||
-        isShopOwner(existing().shopId)
+        (resource != null && isShopOwner(existing().shopId))
       );
 
       allow list: if isEmailVerified() && (
+        request.auth.token.email.lower() == 'shivamraj.in5@gmail.com' ||
         existing().uid == request.auth.uid ||
         existing().email.lower() == request.auth.token.email.lower()
       );
@@ -299,21 +302,28 @@ service cloud.firestore {
     match /shops/{shopId} {
       allow get: if isValidId(shopId) && (
         isActiveSuperAdmin() ||
+        (isEmailVerified() && resource == null) ||
         isShopMember(shopId) ||
-        isEmailMatch(existing().email)
+        (resource != null && isEmailMatch(existing().email))
       );
 
       allow list: if isEmailVerified() && (
+        request.auth.token.email.lower() == 'shivamraj.in5@gmail.com' ||
         existing().ownerUid == request.auth.uid ||
-        existing().email.lower() == request.auth.token.email.lower()
+        existing().email == request.auth.token.email.lower()
       );
 
       allow create: if isValidId(shopId) &&
-        isActiveSuperAdmin() &&
+        isEmailVerified() &&
         isValidShop(incoming()) &&
         incoming().shopId == shopId &&
         incoming().createdAt == request.time &&
-        incoming().updatedAt == request.time;
+        incoming().updatedAt == request.time && (
+          isActiveSuperAdmin() ||
+          (isEmailMatch(incoming().email) &&
+           incoming().ownerUid == request.auth.uid &&
+           (!('ownerEmail' in incoming()) || isEmailMatch(incoming().ownerEmail)))
+        );
 
       allow update: if isValidId(shopId) &&
         isEmailVerified() &&
@@ -324,7 +334,7 @@ service cloud.firestore {
         incoming().updatedAt == request.time && (
           isActiveSuperAdmin() ||
           (isShopOwner(shopId) &&
-           incoming().diff(existing()).affectedKeys().hasOnly(['shopName', 'phone', 'address', 'gstin', 'ownerUid', 'updatedAt']))
+           incoming().diff(existing()).affectedKeys().hasOnly(['shopName', 'phone', 'address', 'gstin', 'pinHash', 'ownerUid', 'updatedAt']))
         );
 
       allow delete: if isValidId(shopId) && isActiveSuperAdmin();
@@ -334,13 +344,17 @@ service cloud.firestore {
     match /shop_owners/{emailKey} {
       allow get: if isValidId(emailKey) && (
         isActiveSuperAdmin() ||
-        isEmailMatch(existing().email) ||
-        isShopMember(existing().shopId)
+        (isEmailVerified() && resource == null) ||
+        (resource != null && (
+          isEmailMatch(existing().email) ||
+          isShopMember(existing().shopId)
+        ))
       );
 
       allow list: if isEmailVerified() && (
+        request.auth.token.email.lower() == 'shivamraj.in5@gmail.com' ||
         existing().ownerUid == request.auth.uid ||
-        existing().email.lower() == request.auth.token.email.lower()
+        existing().email == request.auth.token.email.lower()
       );
 
       allow create: if isValidId(emailKey) &&
@@ -373,10 +387,14 @@ service cloud.firestore {
 
       // Shop Inventory Items Subcollection (Owner full write/delete; Employee read + stock deduction)
       match /items/{itemId} {
-        allow get: if isValidId(emailKey) && isValidId(itemId) && isWorkspaceMember(emailKey);
+        allow get: if isValidId(emailKey) && isValidId(itemId) && (
+          isActiveSuperAdmin() ||
+          isWorkspaceMember(emailKey)
+        );
 
         allow list: if isEmailVerified() && (
-          existing().ownerEmail.lower() == request.auth.token.email.lower() ||
+          request.auth.token.email.lower() == 'shivamraj.in5@gmail.com' ||
+          existing().ownerEmail == request.auth.token.email.lower() ||
           existing().ownerUid == request.auth.uid
         );
 
@@ -384,8 +402,10 @@ service cloud.firestore {
           isValidShopItem(incoming()) &&
           incoming().id == itemId &&
           incoming().updatedAt == request.time &&
-          exists(/databases/$(database)/documents/shop_owners/$(emailKey)) &&
-          isWorkspaceMember(emailKey);
+          exists(/databases/$(database)/documents/shop_owners/$(emailKey)) && (
+            isActiveSuperAdmin() ||
+            isWorkspaceMember(emailKey)
+          );
 
         allow update: if isValidId(emailKey) && isValidId(itemId) &&
           isValidShopItem(incoming()) &&
@@ -393,21 +413,30 @@ service cloud.firestore {
           incoming().ownerEmail == existing().ownerEmail &&
           incoming().updatedAt == request.time &&
           exists(/databases/$(database)/documents/shop_owners/$(emailKey)) && (
+            isActiveSuperAdmin() ||
             (isWorkspaceOwner(emailKey) &&
              incoming().diff(existing()).affectedKeys().hasOnly(['name', 'code', 'price', 'stock', 'category', 'unit', 'shopId', 'ownerUid', 'updatedAt'])) ||
             (isWorkspaceMember(emailKey) &&
              incoming().diff(existing()).affectedKeys().hasOnly(['stock', 'updatedAt']))
           );
 
-        allow delete: if isValidId(emailKey) && isValidId(itemId) && isWorkspaceOwner(emailKey);
+        allow delete: if isValidId(emailKey) && isValidId(itemId) && (
+          isActiveSuperAdmin() ||
+          isWorkspaceOwner(emailKey)
+        );
       }
 
       // Immutable Shop Bills Subcollection (Owner & active employee of shop can create/read; NO update/delete)
       match /bills/{billId} {
-        allow get: if isValidId(emailKey) && isValidId(billId) && isWorkspaceMember(emailKey);
+        allow get: if isValidId(emailKey) && isValidId(billId) && (
+          isActiveSuperAdmin() ||
+          (isEmailVerified() && resource == null && isWorkspaceMember(emailKey)) ||
+          isWorkspaceMember(emailKey)
+        );
 
         allow list: if isEmailVerified() && (
-          existing().ownerEmail.lower() == request.auth.token.email.lower() ||
+          request.auth.token.email.lower() == 'shivamraj.in5@gmail.com' ||
+          existing().ownerEmail == request.auth.token.email.lower() ||
           existing().actorUid == request.auth.uid
         );
 
@@ -416,8 +445,10 @@ service cloud.firestore {
           incoming().id == billId &&
           incoming().createdAt == request.time &&
           exists(/databases/$(database)/documents/shop_owners/$(emailKey)) &&
-          isWorkspaceMember(emailKey) &&
-          incoming().actorUid == request.auth.uid;
+          incoming().actorUid == request.auth.uid && (
+            isActiveSuperAdmin() ||
+            isWorkspaceMember(emailKey)
+          );
 
         allow update, delete: if false;
       }
@@ -430,24 +461,35 @@ service cloud.firestore {
         (isEmailVerified() && request.auth.uid == adminId)
       );
 
-      allow list: if isEmailVerified() &&
-        existing().email.lower() == request.auth.token.email.lower();
+      allow list: if isEmailVerified() && (
+        request.auth.token.email.lower() == 'shivamraj.in5@gmail.com' ||
+        existing().email.lower() == request.auth.token.email.lower()
+      );
 
-      allow create, update, delete: if isValidId(adminId) &&
+      allow create: if isValidId(adminId) &&
         isActiveSuperAdmin() &&
         isValidAdmin(incoming()) &&
         incoming().createdAt == request.time;
+
+      allow update: if isValidId(adminId) &&
+        isActiveSuperAdmin() &&
+        isValidAdmin(incoming()) &&
+        incoming().createdAt == existing().createdAt;
+
+      allow delete: if isValidId(adminId) && isActiveSuperAdmin();
     }
 
     // Immutable Audit Logs Collection
     match /audit_logs/{logId} {
       allow get: if isValidId(logId) && (
         isActiveSuperAdmin() ||
-        isShopOwner(existing().shopId)
+        (resource != null && isShopOwner(existing().shopId))
       );
 
-      allow list: if isEmailVerified() &&
-        existing().actorUid == request.auth.uid;
+      allow list: if isEmailVerified() && (
+        request.auth.token.email.lower() == 'shivamraj.in5@gmail.com' ||
+        existing().actorUid == request.auth.uid
+      );
 
       allow create: if isValidId(logId) &&
         isEmailVerified() &&

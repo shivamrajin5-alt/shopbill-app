@@ -348,6 +348,85 @@ export interface ShopBillDatabase {
       errors?: Array<{ id: string; type: 'item' | 'bill'; error: string }>;
     }
   ) => { syncedItems: number; syncedBills: number; lastSyncedAt: string };
+  upsertShopFromVerifiedCloud: (cloudShop: {
+    shopId: string;
+    email: string;
+    emailKey?: string;
+    ownerUid?: string;
+    shopName: string;
+    ownerName: string;
+    phone?: string;
+    address?: string;
+    gstin?: string;
+    tagline?: string;
+    taxRatePercent?: number;
+    currencySymbol?: string;
+    pinHash?: string;
+    status?: ShopStatus;
+    isActive?: boolean;
+    createdAt?: string;
+    updatedAt?: string;
+  }) => DbShopRecord | null;
+  mergeCloudDataForOwner: (
+    idOrEmail: string,
+    cloudData: {
+      shop?: {
+        shopName?: string;
+        ownerName?: string;
+        phone?: string;
+        address?: string;
+        gstin?: string;
+        tagline?: string;
+        taxRatePercent?: number;
+        currencySymbol?: string;
+        pinHash?: string;
+        status?: ShopStatus;
+        isActive?: boolean;
+        updatedAt?: string;
+      } | null;
+      items?: Array<{
+        id: string;
+        name: string;
+        code?: string;
+        price: number;
+        stock: number;
+        category?: string;
+        unit?: string;
+        updatedAt?: string;
+      }>;
+      bills?: Array<{
+        id: string;
+        billNumber: string;
+        createdAt?: string;
+        customerName?: string;
+        customerPhone?: string;
+        subtotal: number;
+        discountAmount?: number;
+        taxAmount?: number;
+        grandTotal: number;
+        paymentMethod?: string;
+        cashierName?: string;
+        actorUid?: string;
+        items?: Array<{
+          itemId?: string;
+          id?: string;
+          name: string;
+          code?: string;
+          unitPrice?: number;
+          price?: number;
+          quantity?: number;
+          qty?: number;
+          unit?: string;
+        }>;
+      }>;
+    }
+  ) => {
+    addedItems: number;
+    updatedItems: number;
+    addedBills: number;
+    shopUpdated: boolean;
+    workspace: DbOwnerWorkspace;
+  };
   recordAuditLog: (entry: {
     shopId: string;
     actorUid?: string;
@@ -2723,6 +2802,419 @@ export function openShopBillDatabase(
     return getOwnerWorkspace(shop.email);
   }
 
+  function upsertShopFromVerifiedCloud(cloudShop: {
+    shopId: string;
+    email: string;
+    emailKey?: string;
+    ownerUid?: string;
+    shopName: string;
+    ownerName: string;
+    phone?: string;
+    address?: string;
+    gstin?: string;
+    tagline?: string;
+    taxRatePercent?: number;
+    currencySymbol?: string;
+    pinHash?: string;
+    status?: ShopStatus;
+    isActive?: boolean;
+    createdAt?: string;
+    updatedAt?: string;
+  }): DbShopRecord | null {
+    const cleanEmail = normalizeEmail(cloudShop.email || '');
+    const cleanShopId = (cloudShop.shopId || '').trim().toUpperCase();
+    if (!cleanEmail || !isValidEmailFormat(cleanEmail) || !cleanShopId) {
+      return null;
+    }
+    const existing = getShopByIdOrEmail(cleanShopId) || getShopByIdOrEmail(cleanEmail);
+    const nowIso = new Date().toISOString();
+    const cloudUpdatedMs = cloudShop.updatedAt ? new Date(cloudShop.updatedAt).getTime() : 0;
+
+    if (!existing) {
+      const emailKey = (cloudShop.emailKey || emailToDocKey(cleanEmail)).trim();
+      const status: ShopStatus = cloudShop.status === 'inactive' || cloudShop.isActive === false ? 'inactive' : 'active';
+      const isActive = status === 'active' ? 1 : 0;
+      const pinHash =
+        cloudShop.pinHash && cloudShop.pinHash.length >= 16
+          ? cloudShop.pinHash
+          : hashPinBcrypt('1234');
+      const createdAt = cloudShop.createdAt || nowIso;
+      const updatedAt = cloudShop.updatedAt || nowIso;
+
+      db.exec('BEGIN');
+      try {
+        db.prepare(`
+          INSERT INTO shop_owners (
+            email, email_key, shop_id, owner_uid, shop_name, owner_name, phone, address, gstin,
+            tagline, tax_rate_percent, currency_symbol, pin_plain, pin_hash,
+            status, is_active, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)
+        `).run(
+          cleanEmail,
+          emailKey,
+          cleanShopId,
+          (cloudShop.ownerUid || '').trim(),
+          (cloudShop.shopName || 'BillKart Store').trim(),
+          (cloudShop.ownerName || 'Owner').trim(),
+          (cloudShop.phone || '').trim(),
+          (cloudShop.address || '').trim(),
+          (cloudShop.gstin || '').trim(),
+          (cloudShop.tagline || 'Fast & Reliable In-Store Billing').trim(),
+          Number.isFinite(Number(cloudShop.taxRatePercent)) ? Number(cloudShop.taxRatePercent) : 5.0,
+          (cloudShop.currencySymbol || '₹').trim(),
+          pinHash,
+          status,
+          isActive,
+          createdAt,
+          updatedAt
+        );
+        db.prepare(`
+          INSERT OR REPLACE INTO users (
+            uid, firebase_uid, email, email_key, display_name, role, shop_id,
+            pin_hash, is_active, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, 'owner', ?, ?, ?, ?, ?)
+        `).run(
+          `usr_${emailKey}`,
+          (cloudShop.ownerUid || '').trim(),
+          cleanEmail,
+          emailKey,
+          (cloudShop.ownerName || 'Owner').trim(),
+          cleanShopId,
+          pinHash,
+          isActive,
+          createdAt,
+          updatedAt
+        );
+        db.exec('COMMIT');
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
+      return getShopByIdOrEmail(cleanEmail);
+    }
+
+    const localUpdatedMs = existing.updatedAt ? new Date(existing.updatedAt).getTime() : 0;
+    const hasNewerTimestamp = cloudUpdatedMs > localUpdatedMs;
+    const hasDifferentPin =
+      Boolean(cloudShop.pinHash && cloudShop.pinHash.length >= 16) &&
+      cloudShop.pinHash !== existing.pinHash &&
+      cloudUpdatedMs >= localUpdatedMs;
+
+    if (!hasNewerTimestamp && !hasDifferentPin) {
+      return existing;
+    }
+
+    const nextPinHash =
+      cloudShop.pinHash && cloudShop.pinHash.length >= 16 ? cloudShop.pinHash : existing.pinHash;
+    const nextStatus: ShopStatus =
+      cloudShop.status === 'inactive' || cloudShop.isActive === false
+        ? 'inactive'
+        : cloudShop.status === 'active' || cloudShop.isActive === true
+          ? 'active'
+          : existing.status;
+    const nextIsActive = nextStatus === 'active' ? 1 : 0;
+    const nextUpdatedAt = cloudShop.updatedAt || nowIso;
+
+    db.exec('BEGIN');
+    try {
+      db.prepare(`
+        UPDATE shop_owners
+        SET shop_name = ?, owner_name = ?, phone = ?, address = ?, gstin = ?,
+            tagline = ?, tax_rate_percent = ?, currency_symbol = ?,
+            owner_uid = COALESCE(NULLIF(?, ''), owner_uid),
+            pin_hash = ?, status = ?, is_active = ?, updated_at = ?
+        WHERE email = ?
+      `).run(
+        (cloudShop.shopName || existing.shopName).trim(),
+        (cloudShop.ownerName || existing.ownerName).trim(),
+        cloudShop.phone !== undefined ? cloudShop.phone.trim() : existing.phone,
+        cloudShop.address !== undefined ? cloudShop.address.trim() : existing.address,
+        cloudShop.gstin !== undefined ? cloudShop.gstin.trim() : existing.gstin,
+        cloudShop.tagline !== undefined ? cloudShop.tagline.trim() : existing.tagline,
+        cloudShop.taxRatePercent !== undefined && Number.isFinite(Number(cloudShop.taxRatePercent))
+          ? Number(cloudShop.taxRatePercent)
+          : existing.taxRatePercent,
+        cloudShop.currencySymbol ? cloudShop.currencySymbol.trim() : existing.currencySymbol,
+        (cloudShop.ownerUid || '').trim(),
+        nextPinHash,
+        nextStatus,
+        nextIsActive,
+        nextUpdatedAt,
+        existing.email
+      );
+      db.prepare(`
+        UPDATE users
+        SET pin_hash = ?, is_active = ?, updated_at = ?
+        WHERE email = ? AND role = 'owner'
+      `).run(nextPinHash, nextIsActive, nextUpdatedAt, existing.email);
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+
+    return getShopByIdOrEmail(existing.email);
+  }
+
+  function mergeCloudDataForOwner(
+    idOrEmail: string,
+    cloudData: {
+      shop?: {
+        shopName?: string;
+        ownerName?: string;
+        phone?: string;
+        address?: string;
+        gstin?: string;
+        tagline?: string;
+        taxRatePercent?: number;
+        currencySymbol?: string;
+        pinHash?: string;
+        status?: ShopStatus;
+        isActive?: boolean;
+        updatedAt?: string;
+      } | null;
+      items?: Array<{
+        id: string;
+        name: string;
+        code?: string;
+        price: number;
+        stock: number;
+        category?: string;
+        unit?: string;
+        updatedAt?: string;
+      }>;
+      bills?: Array<{
+        id: string;
+        billNumber: string;
+        createdAt?: string;
+        customerName?: string;
+        customerPhone?: string;
+        subtotal: number;
+        discountAmount?: number;
+        taxAmount?: number;
+        grandTotal: number;
+        paymentMethod?: string;
+        cashierName?: string;
+        actorUid?: string;
+        items?: Array<{
+          itemId?: string;
+          id?: string;
+          name: string;
+          code?: string;
+          unitPrice?: number;
+          price?: number;
+          quantity?: number;
+          qty?: number;
+          unit?: string;
+        }>;
+      }>;
+    }
+  ): {
+    addedItems: number;
+    updatedItems: number;
+    addedBills: number;
+    shopUpdated: boolean;
+    workspace: DbOwnerWorkspace;
+  } {
+    const shop = getShopByIdOrEmail(idOrEmail);
+    if (!shop) {
+      throw new DbValidationError(`Shop owner account "${idOrEmail}" not found.`);
+    }
+
+    const nowIso = new Date().toISOString();
+    let addedItems = 0;
+    let updatedItems = 0;
+    let addedBills = 0;
+    let shopUpdated = false;
+
+    db.exec('BEGIN');
+    try {
+      if (cloudData.shop) {
+        const localUpdatedMs = shop.updatedAt ? new Date(shop.updatedAt).getTime() : 0;
+        const cloudUpdatedMs = cloudData.shop.updatedAt
+          ? new Date(cloudData.shop.updatedAt).getTime()
+          : 0;
+        if (cloudUpdatedMs > localUpdatedMs) {
+          const nextPinHash =
+            cloudData.shop.pinHash && cloudData.shop.pinHash.length >= 16
+              ? cloudData.shop.pinHash
+              : shop.pinHash;
+          const nextStatus: ShopStatus =
+            cloudData.shop.status === 'inactive' || cloudData.shop.isActive === false
+              ? 'inactive'
+              : shop.status;
+          const nextIsActive = nextStatus === 'active' ? 1 : 0;
+          const nextUpdatedAt = cloudData.shop.updatedAt || nowIso;
+
+          db.prepare(`
+            UPDATE shop_owners
+            SET shop_name = ?, owner_name = ?, phone = ?, address = ?, gstin = ?,
+                tagline = ?, tax_rate_percent = ?, currency_symbol = ?,
+                pin_hash = ?, status = ?, is_active = ?, updated_at = ?
+            WHERE email = ?
+          `).run(
+            (cloudData.shop.shopName || shop.shopName).trim(),
+            (cloudData.shop.ownerName || shop.ownerName).trim(),
+            cloudData.shop.phone !== undefined ? cloudData.shop.phone.trim() : shop.phone,
+            cloudData.shop.address !== undefined ? cloudData.shop.address.trim() : shop.address,
+            cloudData.shop.gstin !== undefined ? cloudData.shop.gstin.trim() : shop.gstin,
+            cloudData.shop.tagline !== undefined ? cloudData.shop.tagline.trim() : shop.tagline,
+            cloudData.shop.taxRatePercent !== undefined &&
+              Number.isFinite(Number(cloudData.shop.taxRatePercent))
+              ? Number(cloudData.shop.taxRatePercent)
+              : shop.taxRatePercent,
+            cloudData.shop.currencySymbol
+              ? cloudData.shop.currencySymbol.trim()
+              : shop.currencySymbol,
+            nextPinHash,
+            nextStatus,
+            nextIsActive,
+            nextUpdatedAt,
+            shop.email
+          );
+          db.prepare(`
+            UPDATE users
+            SET pin_hash = ?, is_active = ?, updated_at = ?
+            WHERE email = ? AND role = 'owner'
+          `).run(nextPinHash, nextIsActive, nextUpdatedAt, shop.email);
+          shopUpdated = true;
+        }
+      }
+
+      const insertItem = db.prepare(`
+        INSERT OR REPLACE INTO items (
+          id, owner_email, name, code, price, stock, category, unit,
+          updated_at, sync_status, synced_at, sync_error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', ?, NULL)
+      `);
+
+      for (const item of cloudData.items || []) {
+        const cleanId = String(item.id || '').trim();
+        if (!cleanId || !item.name) continue;
+        const existingItem = db
+          .prepare('SELECT updated_at, sync_status FROM items WHERE owner_email = ? AND id = ?')
+          .get(shop.email, cleanId) as { updated_at: string; sync_status: string } | undefined;
+        const cloudItemUpdated = item.updatedAt || nowIso;
+        const cloudItemMs = new Date(cloudItemUpdated).getTime();
+
+        if (!existingItem) {
+          insertItem.run(
+            cleanId,
+            shop.email,
+            String(item.name).trim(),
+            String(item.code || '').trim(),
+            Math.max(0, Number(item.price) || 0),
+            Math.max(0, Number(item.stock) || 0),
+            String(item.category || 'General').trim(),
+            item.unit === 'kg' ? 'kg' : 'pcs',
+            cloudItemUpdated,
+            nowIso
+          );
+          addedItems += 1;
+        } else {
+          const localItemMs = existingItem.updated_at ? new Date(existingItem.updated_at).getTime() : 0;
+          if (cloudItemMs > localItemMs) {
+            insertItem.run(
+              cleanId,
+              shop.email,
+              String(item.name).trim(),
+              String(item.code || '').trim(),
+              Math.max(0, Number(item.price) || 0),
+              Math.max(0, Number(item.stock) || 0),
+              String(item.category || 'General').trim(),
+              item.unit === 'kg' ? 'kg' : 'pcs',
+              cloudItemUpdated,
+              nowIso
+            );
+            updatedItems += 1;
+          }
+        }
+      }
+
+      const insertBill = db.prepare(`
+        INSERT INTO bills (
+          id, owner_email, bill_number, customer_name, customer_phone,
+          subtotal, discount_amount, tax_amount, grand_total,
+          payment_method, cashier_name, actor_uid, created_at, sync_status, synced_at, sync_error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', ?, NULL)
+      `);
+      const insertLine = db.prepare(`
+        INSERT INTO bill_items (owner_email, bill_id, item_id, name, code, unit_price, quantity, unit)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      for (const bill of cloudData.bills || []) {
+        const cleanId = String(bill.id || '').trim();
+        const billNumber = String(bill.billNumber || '').trim();
+        if (!cleanId || !billNumber) continue;
+
+        const existingBill = db
+          .prepare('SELECT id, sync_status FROM bills WHERE owner_email = ? AND (id = ? OR bill_number = ?)')
+          .get(shop.email, cleanId, billNumber) as { id: string; sync_status: string } | undefined;
+
+        if (existingBill) {
+          if (existingBill.sync_status !== 'synced') {
+            db.prepare(
+              "UPDATE bills SET sync_status = 'synced', synced_at = ?, sync_error = NULL WHERE owner_email = ? AND id = ?"
+            ).run(nowIso, shop.email, existingBill.id);
+          }
+          continue;
+        }
+
+        const method: PaymentMode = ['Cash', 'UPI', 'Card', 'Other'].includes(
+          String(bill.paymentMethod || '')
+        )
+          ? (bill.paymentMethod as PaymentMode)
+          : 'Cash';
+
+        insertBill.run(
+          cleanId,
+          shop.email,
+          billNumber,
+          String(bill.customerName || ''),
+          String(bill.customerPhone || ''),
+          Math.max(0, Number(bill.subtotal) || 0),
+          Math.max(0, Number(bill.discountAmount) || 0),
+          Math.max(0, Number(bill.taxAmount) || 0),
+          Math.max(0, Number(bill.grandTotal) || 0),
+          method,
+          String(bill.cashierName || shop.ownerName),
+          String(bill.actorUid || ''),
+          bill.createdAt || nowIso,
+          nowIso
+        );
+
+        for (const line of bill.items || []) {
+          insertLine.run(
+            shop.email,
+            cleanId,
+            String(line.itemId || line.id || 'item'),
+            String(line.name || 'Item'),
+            String(line.code || ''),
+            Math.max(0, Number(line.unitPrice ?? line.price) || 0),
+            Math.max(0, Number(line.quantity ?? line.qty) || 0),
+            line.unit === 'kg' ? 'kg' : 'pcs'
+          );
+        }
+        addedBills += 1;
+      }
+
+      db.prepare('UPDATE shop_owners SET last_synced_at = ? WHERE email = ?').run(nowIso, shop.email);
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+
+    return {
+      addedItems,
+      updatedItems,
+      addedBills,
+      shopUpdated,
+      workspace: getOwnerWorkspace(shop.email)!,
+    };
+  }
+
   return {
     close: () => db.close(),
     listShops,
@@ -2755,6 +3247,8 @@ export function openShopBillDatabase(
     createOwnerBill,
     getPendingSyncForOwner,
     markOwnerRecordsSynced,
+    upsertShopFromVerifiedCloud,
+    mergeCloudDataForOwner,
     recordAuditLog,
     listAuditLogsForShop,
     listAllAuditLogs,

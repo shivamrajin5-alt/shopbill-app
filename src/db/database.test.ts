@@ -470,3 +470,82 @@ test('records audit logs and supports validated backup export & restore', () => 
     db.close();
   }
 });
+
+test('upsertShopFromVerifiedCloud syncs updated PIN hash and mergeCloudDataForOwner pulls bills without wiping offline bills', () => {
+  const db = openShopBillDatabase(':memory:');
+  try {
+    // 1. Simulate fresh device B with default SB-1001 PIN '1234'
+    const beforeLogin = db.verifyShopLogin('SB-1001', '5678', 'rajesh@quickmart.in');
+    assert.equal(beforeLogin.success, false);
+
+    // 2. Simulate cloud shop having a newer updatedAt and bcrypt hash for PIN '5678'
+    const newHash = hashPinSha256('5678');
+    const syncedShop = db.upsertShopFromVerifiedCloud({
+      shopId: 'SB-1001',
+      email: 'rajesh@quickmart.in',
+      shopName: 'QuickMart Store',
+      ownerName: 'Rajesh Sharma',
+      pinHash: newHash,
+      updatedAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    assert.ok(syncedShop);
+
+    // Device B can now log in with updated PIN '5678'
+    const afterLogin = db.verifyShopLogin('SB-1001', '5678', 'rajesh@quickmart.in');
+    assert.equal(afterLogin.success, true);
+
+    // 3. Device B has an offline pending bill; cloud has a new bill created on Phone
+    db.createOwnerBill('rajesh@quickmart.in', {
+      id: 'b_local_pending',
+      billNumber: 'SB-2001',
+      createdAt: new Date().toISOString(),
+      customerName: '',
+      customerPhone: '',
+      subtotal: 50,
+      discountAmount: 0,
+      taxAmount: 0,
+      grandTotal: 50,
+      paymentMethod: 'Cash',
+      cashierName: 'Laptop',
+      items: [{ itemId: 'i1', name: 'Basmati Rice', code: 'BR101', unitPrice: 50, quantity: 1, unit: 'kg' }],
+    });
+
+    const merged = db.mergeCloudDataForOwner('rajesh@quickmart.in', {
+      bills: [
+        {
+          id: 'b_from_phone',
+          billNumber: 'SB-2002',
+          createdAt: new Date().toISOString(),
+          subtotal: 120,
+          discountAmount: 0,
+          taxAmount: 0,
+          grandTotal: 120,
+          paymentMethod: 'UPI',
+          cashierName: 'Phone',
+          items: [{ itemId: 'i1', name: 'Basmati Rice', code: 'BR101', unitPrice: 120, quantity: 1, unit: 'kg' }],
+        },
+      ],
+      items: [
+        {
+          id: 'i_cloud_new',
+          name: 'Cloud Masala',
+          code: 'CM1',
+          price: 85,
+          stock: 10,
+          category: 'Spices',
+          unit: 'pcs',
+          updatedAt: new Date().toISOString(),
+        },
+      ],
+    });
+
+    assert.equal(merged.addedBills, 1);
+    assert.equal(merged.addedItems, 1);
+    assert.ok(merged.workspace.bills.some((b) => b.id === 'b_from_phone' && b.syncStatus === 'synced'));
+    assert.ok(merged.workspace.bills.some((b) => b.id === 'b_local_pending' && b.syncStatus === 'pending'));
+    assert.ok(merged.workspace.items.some((i) => i.id === 'i_cloud_new'));
+  } finally {
+    db.close();
+  }
+});
+

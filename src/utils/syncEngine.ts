@@ -3,12 +3,16 @@ import {
   createOwnerBillInDb,
   fetchPendingSync,
   markSyncedInDb,
+  mergeCloudWorkspaceInDb,
 } from '../services/shopApi';
 import {
   ensureOwnerWorkspaceInFirestore,
+  pullFirestoreWorkspace,
   syncBillToFirestore,
   syncItemToFirestore,
 } from '../firebase';
+
+export const SUPER_ADMIN_EMAIL = 'shivamraj.in5@gmail.com';
 
 export type OfflineQueueMap = Record<string, ApiBillRecord[]>;
 
@@ -26,6 +30,16 @@ export function isMatchingCloudEmail(
   const a = normalizeOwnerKey(cloudEmail || '');
   const b = normalizeOwnerKey(ownerEmail || '');
   return Boolean(a && b && a === b);
+}
+
+export function isCloudSyncAuthorizedForEmail(
+  cloudEmail: string | null | undefined,
+  ownerEmail: string | null | undefined
+): boolean {
+  const normCloud = normalizeOwnerKey(cloudEmail || '');
+  if (!normCloud) return false;
+  if (normCloud === SUPER_ADMIN_EMAIL) return true;
+  return isMatchingCloudEmail(normCloud, ownerEmail);
 }
 
 export function computeExponentialBackoffMs(attempt: number, baseMs: number = 1500, maxMs: number = 60_000): number {
@@ -265,6 +279,8 @@ export interface SyncRunResult {
   flushedToSqlite: number;
   syncedItems: number;
   syncedBills: number;
+  pulledItems?: number;
+  pulledBills?: number;
   pendingRemaining: number;
   lastSyncedAt?: string | null;
   workspace?: ApiOwnerWorkspace;
@@ -331,24 +347,27 @@ async function executeOfflineToFirestoreSync(
   }
 
   const totalPending = pending.items.length + pending.bills.length;
-  if (totalPending === 0) {
-    backoffStateByEmail.delete(key);
-    return {
-      status: 'synced',
-      flushedToSqlite,
-      syncedItems: 0,
-      syncedBills: 0,
-      pendingRemaining: 0,
-      lastSyncedAt: pending.shop.lastSyncedAt || loadLastSyncedAt(ownerEmail),
-    };
-  }
-
   if (!options.hasCloudAuth) {
+    if (totalPending === 0) {
+      backoffStateByEmail.delete(key);
+      return {
+        status: 'synced',
+        flushedToSqlite,
+        syncedItems: 0,
+        syncedBills: 0,
+        pulledItems: 0,
+        pulledBills: 0,
+        pendingRemaining: 0,
+        lastSyncedAt: pending.shop.lastSyncedAt || loadLastSyncedAt(ownerEmail),
+      };
+    }
     return {
       status: 'needs_auth',
       flushedToSqlite,
       syncedItems: 0,
       syncedBills: 0,
+      pulledItems: 0,
+      pulledBills: 0,
       pendingRemaining: pending.bills.length,
     };
   }
@@ -357,73 +376,116 @@ async function executeOfflineToFirestoreSync(
   const syncedBillIds: string[] = [];
   const errors: Array<{ id: string; type: 'item' | 'bill'; error: string }> = [];
 
+  if (totalPending > 0) {
+    try {
+      await runWithExponentialRetry(() => ensureOwnerWorkspaceInFirestore(pending.shop), {
+        maxAttempts: 2,
+        baseDelayMs: 300,
+      });
+    } catch (err) {
+      const prevFails = (backoffStateByEmail.get(key)?.failures || 0) + 1;
+      backoffStateByEmail.set(key, {
+        failures: prevFails,
+        retryAfterMs: Date.now() + computeExponentialBackoffMs(prevFails),
+      });
+      const msg = err instanceof Error ? err.message : 'Failed to initialize owner cloud record.';
+      return {
+        status: 'partial',
+        flushedToSqlite,
+        syncedItems: 0,
+        syncedBills: 0,
+        pulledItems: 0,
+        pulledBills: 0,
+        pendingRemaining: pending.bills.length,
+        error: msg,
+      };
+    }
+
+    for (const item of pending.items) {
+      try {
+        const ok = await runWithExponentialRetry(
+          () =>
+            syncItemToFirestore(pending.shop.emailKey, pending.shop.email, {
+              ...item,
+              shopId: pending.shop.shopId,
+            }),
+          { maxAttempts: 2, baseDelayMs: 250 }
+        );
+        if (ok) syncedItemIds.push(item.id);
+      } catch (err) {
+        errors.push({
+          id: item.id,
+          type: 'item',
+          error: err instanceof Error ? err.message : 'Item sync failed',
+        });
+      }
+    }
+
+    for (const bill of pending.bills) {
+      try {
+        const ok = await runWithExponentialRetry(
+          () =>
+            syncBillToFirestore(pending.shop.emailKey, pending.shop.email, {
+              ...bill,
+              shopId: pending.shop.shopId,
+            }),
+          { maxAttempts: 2, baseDelayMs: 250 }
+        );
+        if (ok) syncedBillIds.push(bill.id);
+      } catch (err) {
+        errors.push({
+          id: bill.id,
+          type: 'bill',
+          error: err instanceof Error ? err.message : 'Bill sync failed',
+        });
+      }
+    }
+  }
+
+  let marked: {
+    syncedItems: number;
+    syncedBills: number;
+    lastSyncedAt: string;
+    workspace: ApiOwnerWorkspace;
+  } | null = null;
+  if (totalPending > 0) {
+    marked = await markSyncedInDb(ownerEmail, {
+      itemIds: syncedItemIds,
+      billIds: syncedBillIds,
+      errors,
+    });
+  }
+
+  // Pull latest bills, items, and PIN/settings from Firestore into SQLite (bidirectional sync)
+  let pulledItems = 0;
+  let pulledBills = 0;
+  let mergedWorkspace: ApiOwnerWorkspace | undefined = marked?.workspace;
   try {
-    await runWithExponentialRetry(() => ensureOwnerWorkspaceInFirestore(pending.shop), {
-      maxAttempts: 2,
-      baseDelayMs: 300,
-    });
-  } catch (err) {
-    const prevFails = (backoffStateByEmail.get(key)?.failures || 0) + 1;
-    backoffStateByEmail.set(key, {
-      failures: prevFails,
-      retryAfterMs: Date.now() + computeExponentialBackoffMs(prevFails),
-    });
-    const msg = err instanceof Error ? err.message : 'Failed to initialize owner cloud record.';
-    return {
-      status: 'partial',
-      flushedToSqlite,
-      syncedItems: 0,
-      syncedBills: 0,
-      pendingRemaining: pending.bills.length,
-      error: msg,
-    };
-  }
-
-  for (const item of pending.items) {
-    try {
-      const ok = await runWithExponentialRetry(
-        () =>
-          syncItemToFirestore(pending.shop.emailKey, pending.shop.email, {
-            ...item,
-            shopId: pending.shop.shopId,
-          }),
-        { maxAttempts: 2, baseDelayMs: 250 }
-      );
-      if (ok) syncedItemIds.push(item.id);
-    } catch (err) {
+    const cloudWorkspace = await runWithExponentialRetry(
+      () =>
+        pullFirestoreWorkspace(
+          pending.shop.emailKey,
+          pending.shop.shopId,
+          pending.shop.email
+        ),
+      { maxAttempts: 2, baseDelayMs: 250 }
+    );
+    const merged = await mergeCloudWorkspaceInDb(ownerEmail, cloudWorkspace);
+    pulledItems = merged.addedItems + merged.updatedItems;
+    pulledBills = merged.addedBills;
+    mergedWorkspace = merged.workspace;
+  } catch (pullErr) {
+    if (errors.length === 0 && options.forceManual) {
       errors.push({
-        id: item.id,
-        type: 'item',
-        error: err instanceof Error ? err.message : 'Item sync failed',
-      });
-    }
-  }
-
-  for (const bill of pending.bills) {
-    try {
-      const ok = await runWithExponentialRetry(
-        () =>
-          syncBillToFirestore(pending.shop.emailKey, pending.shop.email, {
-            ...bill,
-            shopId: pending.shop.shopId,
-          }),
-        { maxAttempts: 2, baseDelayMs: 250 }
-      );
-      if (ok) syncedBillIds.push(bill.id);
-    } catch (err) {
-      errors.push({
-        id: bill.id,
+        id: 'cloud_pull',
         type: 'bill',
-        error: err instanceof Error ? err.message : 'Bill sync failed',
+        error: pullErr instanceof Error ? pullErr.message : 'Cloud pull failed',
       });
     }
   }
 
-  const marked = await markSyncedInDb(ownerEmail, {
-    itemIds: syncedItemIds,
-    billIds: syncedBillIds,
-    errors,
-  });
+  const finalLastSyncedAt =
+    marked?.lastSyncedAt || mergedWorkspace?.shop.lastSyncedAt || new Date().toISOString();
 
   if (errors.length > 0) {
     const prevFails = (backoffStateByEmail.get(key)?.failures || 0) + 1;
@@ -433,18 +495,20 @@ async function executeOfflineToFirestoreSync(
     });
   } else {
     backoffStateByEmail.delete(key);
-    saveLastSyncedAt(ownerEmail, marked.lastSyncedAt);
+    saveLastSyncedAt(ownerEmail, finalLastSyncedAt);
   }
 
   const pendingRemaining = Math.max(0, pending.bills.length - syncedBillIds.length);
   return {
     status: pendingRemaining === 0 && errors.length === 0 ? 'synced' : 'partial',
     flushedToSqlite,
-    syncedItems: marked.syncedItems,
-    syncedBills: marked.syncedBills,
+    syncedItems: marked?.syncedItems ?? 0,
+    syncedBills: marked?.syncedBills ?? 0,
+    pulledItems,
+    pulledBills,
     pendingRemaining,
-    lastSyncedAt: marked.lastSyncedAt,
-    workspace: marked.workspace,
+    lastSyncedAt: finalLastSyncedAt,
+    workspace: mergedWorkspace,
     error: errors.length > 0 ? errors[0].error : undefined,
   };
 }

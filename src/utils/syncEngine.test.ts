@@ -6,12 +6,14 @@ import {
   dequeueOfflineBill,
   enqueueOfflineBill,
   getOfflineBillsForOwner,
+  isCloudSyncAuthorizedForEmail,
   isMatchingCloudEmail,
   mergeOfflineAndDbBills,
   resolveItemSyncConflict,
   runWithExponentialRetry,
   shouldAutoSync,
   summarizeSyncState,
+  SUPER_ADMIN_EMAIL,
   type OfflineQueueMap,
 } from './syncEngine';
 
@@ -190,6 +192,13 @@ test('isMatchingCloudEmail permits cloud sync only when verified Google email ma
   assert.equal(isMatchingCloudEmail('other@gmail.com', 'rajesh@quickmart.in'), false);
   assert.equal(isMatchingCloudEmail(null, 'rajesh@quickmart.in'), false);
   assert.equal(isMatchingCloudEmail('rajesh@quickmart.in', ''), false);
+});
+
+test('isCloudSyncAuthorizedForEmail permits exact owner match and bootstrapped super_admin email for Demo Store sync', () => {
+  assert.equal(isCloudSyncAuthorizedForEmail(SUPER_ADMIN_EMAIL, 'rajesh@quickmart.in'), true);
+  assert.equal(isCloudSyncAuthorizedForEmail('other@gmail.com', 'rajesh@quickmart.in'), false);
+  assert.equal(isCloudSyncAuthorizedForEmail('rajesh@quickmart.in', 'rajesh@quickmart.in'), true);
+  assert.equal(isCloudSyncAuthorizedForEmail(null, 'rajesh@quickmart.in'), false);
 });
 
 test('computeExponentialBackoffMs grows exponentially and caps at maxMs', () => {

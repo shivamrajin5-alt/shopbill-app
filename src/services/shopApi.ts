@@ -587,3 +587,47 @@ export async function markSyncedInDb(
     body: JSON.stringify(payload),
   });
 }
+
+export async function syncCloudShopBeforeLoginInDb(payload: {
+  idToken: string;
+  shopId?: string;
+  email?: string;
+}): Promise<{ synced: boolean; shop?: ApiShopRecord }> {
+  return await requestJson<{ synced: boolean; shop?: ApiShopRecord }>('/api/auth/sync-cloud-shop', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${payload.idToken}`,
+    },
+    body: JSON.stringify({
+      shopId: payload.shopId || '',
+      email: payload.email || '',
+    }),
+  });
+}
+
+export async function mergeCloudWorkspaceInDb(
+  email: string,
+  cloudData: {
+    shop?: unknown;
+    items?: unknown[];
+    bills?: unknown[];
+  }
+): Promise<{
+  addedItems: number;
+  updatedItems: number;
+  addedBills: number;
+  shopUpdated: boolean;
+  workspace: ApiOwnerWorkspace;
+}> {
+  return await requestJson<{
+    addedItems: number;
+    updatedItems: number;
+    addedBills: number;
+    shopUpdated: boolean;
+    workspace: ApiOwnerWorkspace;
+  }>(`/api/owners/${encodeURIComponent(email)}/sync/merge-cloud`, {
+    method: 'POST',
+    body: JSON.stringify(cloudData),
+  });
+}
+

@@ -354,6 +354,155 @@ async function createServer() {
     }
   });
 
+  const readFirestoreFields = (fields: Record<string, Record<string, unknown>> | undefined) => {
+    const out: Record<string, unknown> = {};
+    if (!fields) return out;
+    for (const [k, v] of Object.entries(fields)) {
+      if (!v || typeof v !== 'object') continue;
+      if ('stringValue' in v) out[k] = v.stringValue;
+      else if ('booleanValue' in v) out[k] = v.booleanValue;
+      else if ('timestampValue' in v) out[k] = v.timestampValue;
+      else if ('doubleValue' in v) out[k] = Number(v.doubleValue);
+      else if ('integerValue' in v) out[k] = Number(v.integerValue);
+    }
+    return out;
+  };
+
+  // Pull authoritative shop record (including latest pinHash) from Firestore REST API using caller's Firebase ID token
+  app.post('/api/auth/sync-cloud-shop', async (req, res) => {
+    const decision = authRateLimiter.consume(`cloudshop:${clientIp(req)}`);
+    if (!decision.allowed) {
+      res.status(429).json({
+        error: `Too many sync checks. Retry in ${decision.retryAfterSeconds}s.`,
+      });
+      return;
+    }
+    try {
+      const idToken =
+        extractHeaderToken(req, 'authorization') || String(req.body?.idToken || '').trim();
+      const requestedShopId = String(req.body?.shopId || '').trim().toUpperCase();
+      const requestedEmail = String(req.body?.email || '').trim().toLowerCase();
+
+      if (!idToken) {
+        res.status(401).json({ error: 'Firebase ID token required.' });
+        return;
+      }
+      if (!fs.existsSync(firebaseConfigPath)) {
+        res.status(404).json({ error: 'Firebase configuration missing.' });
+        return;
+      }
+      const fbCfg = JSON.parse(fs.readFileSync(firebaseConfigPath, 'utf-8')) as {
+        projectId?: string;
+        firestoreDatabaseId?: string;
+      };
+      if (!fbCfg.projectId || !fbCfg.firestoreDatabaseId) {
+        res.status(500).json({ error: 'Incomplete Firebase configuration.' });
+        return;
+      }
+
+      const baseUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+        fbCfg.projectId
+      )}/databases/${encodeURIComponent(fbCfg.firestoreDatabaseId)}/documents`;
+      const headers = { Authorization: `Bearer ${idToken}` };
+
+      let shopFields: Record<string, unknown> | null = null;
+      if (requestedShopId) {
+        const shopRes = await fetch(`${baseUrl}/shops/${encodeURIComponent(requestedShopId)}`, {
+          headers,
+        });
+        if (shopRes.ok) {
+          const shopDoc = (await shopRes.json()) as {
+            fields?: Record<string, Record<string, unknown>>;
+          };
+          if (shopDoc.fields) {
+            shopFields = readFirestoreFields(shopDoc.fields);
+          }
+        }
+      } else if (requestedEmail) {
+        const queryRes = await fetch(`${baseUrl}:runQuery`, {
+          method: 'POST',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            structuredQuery: {
+              from: [{ collectionId: 'shops' }],
+              where: {
+                fieldFilter: {
+                  field: { fieldPath: 'email' },
+                  op: 'EQUAL',
+                  value: { stringValue: requestedEmail },
+                },
+              },
+              limit: 1,
+            },
+          }),
+        });
+        if (queryRes.ok) {
+          const rows = (await queryRes.json()) as Array<{
+            document?: { fields?: Record<string, Record<string, unknown>> };
+          }>;
+          const firstDoc = rows.find((r) => r.document?.fields)?.document;
+          if (firstDoc?.fields) {
+            shopFields = readFirestoreFields(firstDoc.fields);
+          }
+        }
+      }
+
+      if (!shopFields || !shopFields.shopId || !shopFields.email) {
+        res.json({ synced: false });
+        return;
+      }
+
+      let ownerFields: Record<string, unknown> = {};
+      if (typeof shopFields.emailKey === 'string' && shopFields.emailKey) {
+        try {
+          const ownerRes = await fetch(
+            `${baseUrl}/shop_owners/${encodeURIComponent(shopFields.emailKey)}`,
+            { headers }
+          );
+          if (ownerRes.ok) {
+            const ownerDoc = (await ownerRes.json()) as {
+              fields?: Record<string, Record<string, unknown>>;
+            };
+            if (ownerDoc.fields) {
+              ownerFields = readFirestoreFields(ownerDoc.fields);
+            }
+          }
+        } catch (_) {}
+      }
+
+      const updatedShop = db.upsertShopFromVerifiedCloud({
+        shopId: String(shopFields.shopId),
+        email: String(shopFields.email),
+        emailKey: typeof shopFields.emailKey === 'string' ? shopFields.emailKey : undefined,
+        ownerUid: typeof shopFields.ownerUid === 'string' ? shopFields.ownerUid : undefined,
+        shopName: String(ownerFields.shopName || shopFields.shopName || 'BillKart Store'),
+        ownerName: String(ownerFields.ownerName || shopFields.ownerName || 'Owner'),
+        phone: String(ownerFields.phone ?? shopFields.phone ?? ''),
+        address: String(ownerFields.address ?? shopFields.address ?? ''),
+        gstin: String(ownerFields.gstin ?? shopFields.gstin ?? ''),
+        tagline: typeof ownerFields.tagline === 'string' ? ownerFields.tagline : undefined,
+        taxRatePercent:
+          typeof ownerFields.taxRatePercent === 'number' ? ownerFields.taxRatePercent : undefined,
+        currencySymbol:
+          typeof ownerFields.currencySymbol === 'string' ? ownerFields.currencySymbol : undefined,
+        pinHash: typeof shopFields.pinHash === 'string' ? shopFields.pinHash : undefined,
+        status: shopFields.status === 'inactive' ? 'inactive' : 'active',
+        isActive: shopFields.isActive !== false && shopFields.status !== 'inactive',
+        createdAt: typeof shopFields.createdAt === 'string' ? shopFields.createdAt : undefined,
+        updatedAt:
+          typeof shopFields.updatedAt === 'string'
+            ? shopFields.updatedAt
+            : typeof ownerFields.updatedAt === 'string'
+              ? ownerFields.updatedAt
+              : undefined,
+      });
+
+      res.json({ synced: Boolean(updatedShop), shop: updatedShop });
+    } catch (err) {
+      handleRouteError(res, err);
+    }
+  });
+
   // --- Owner & Employee Login + Rate Limited Auth ---
   app.post('/api/auth/verify-email', (req, res) => {
     const decision = authRateLimiter.consume(`verify:${clientIp(req)}`);
@@ -744,6 +893,21 @@ async function createServer() {
       const result = db.markOwnerRecordsSynced(email, req.body || {});
       const workspace = db.getOwnerWorkspace(email);
       res.json({ ...result, workspace });
+    } catch (err) {
+      handleRouteError(res, err);
+    }
+  });
+
+  app.post('/api/owners/:email/sync/merge-cloud', requireShopMember, (req, res) => {
+    const rate = syncRateLimiter.consume(`merge:${req.ownerSession?.shopId || clientIp(req)}`);
+    if (!rate.allowed) {
+      res.status(429).json({ error: `Sync rate limit exceeded. Retry in ${rate.retryAfterSeconds}s.` });
+      return;
+    }
+    try {
+      const email = decodeURIComponent(req.params.email);
+      const result = db.mergeCloudDataForOwner(email, req.body || {});
+      res.json(result);
     } catch (err) {
       handleRouteError(res, err);
     }
