@@ -1,0 +1,465 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default-deny global safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core Identity & Format Helpers
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      return isSignedIn() &&
+        request.auth.token.email is string &&
+        request.auth.token.email_verified == true;
+    }
+
+    function isEmailMatch(emailVal) {
+      return isEmailVerified() &&
+        emailVal is string &&
+        request.auth.token.email.lower() == emailVal.lower();
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidStr(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    // Admin Role Lookup (no hardcoded admin emails)
+    function isActiveSuperAdmin() {
+      return isEmailVerified() &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'super_admin' &&
+        get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.isActive == true;
+    }
+
+    // User & Multi-Tenant Shop Membership Helpers (UID + shopId)
+    function hasActiveUserDoc() {
+      return isEmailVerified() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isActive == true;
+    }
+
+    function currentUserDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isShopOwner(shopId) {
+      return (hasActiveUserDoc() &&
+          currentUserDoc().role == 'owner' &&
+          currentUserDoc().shopId == shopId) ||
+        (isEmailVerified() &&
+          exists(/databases/$(database)/documents/shops/$(shopId)) && (
+            get(/databases/$(database)/documents/shops/$(shopId)).data.ownerUid == request.auth.uid ||
+            isEmailMatch(get(/databases/$(database)/documents/shops/$(shopId)).data.email)
+          ));
+    }
+
+    function isShopEmployee(shopId) {
+      return hasActiveUserDoc() &&
+        currentUserDoc().role == 'employee' &&
+        currentUserDoc().shopId == shopId;
+    }
+
+    function isShopMember(shopId) {
+      return isShopOwner(shopId) || isShopEmployee(shopId);
+    }
+
+    function isWorkspaceOwner(emailKey) {
+      return exists(/databases/$(database)/documents/shop_owners/$(emailKey)) && (
+        isEmailMatch(get(/databases/$(database)/documents/shop_owners/$(emailKey)).data.email) ||
+        get(/databases/$(database)/documents/shop_owners/$(emailKey)).data.ownerUid == request.auth.uid ||
+        isShopOwner(get(/databases/$(database)/documents/shop_owners/$(emailKey)).data.shopId)
+      );
+    }
+
+    function isWorkspaceMember(emailKey) {
+      return isWorkspaceOwner(emailKey) || (
+        exists(/databases/$(database)/documents/shop_owners/$(emailKey)) &&
+        isShopMember(get(/databases/$(database)/documents/shop_owners/$(emailKey)).data.shopId)
+      );
+    }
+
+    // Entity Validation Blueprints (synchronized with firebase-blueprint.json)
+    function isValidUser(data) {
+      return data.keys().hasAll([
+               'uid', 'email', 'emailKey', 'displayName',
+               'role', 'shopId', 'isActive', 'createdAt', 'updatedAt'
+             ]) &&
+             data.keys().hasOnly([
+               'uid', 'email', 'emailKey', 'displayName',
+               'role', 'shopId', 'isActive', 'createdAt', 'updatedAt'
+             ]) &&
+             isValidId(data.uid) &&
+             isValidStr(data.email, 3, 120) &&
+             isValidId(data.emailKey) &&
+             isValidStr(data.displayName, 1, 100) &&
+             data.role in ['owner', 'employee', 'admin'] &&
+             isValidStr(data.shopId, 2, 64) &&
+             data.shopId.matches('^[a-zA-Z0-9_\\-]+$') &&
+             data.isActive is bool &&
+             data.createdAt is timestamp &&
+             data.updatedAt is timestamp;
+    }
+
+    function isValidShop(data) {
+      return data.keys().hasAll([
+               'shopId', 'shopName', 'ownerName', 'email', 'emailKey',
+               'phone', 'address', 'pinHash', 'status', 'isActive',
+               'createdAt', 'updatedAt'
+             ]) &&
+             data.keys().hasOnly([
+               'shopId', 'shopName', 'ownerName', 'ownerEmail', 'email', 'ownerUid',
+               'emailKey', 'phone', 'address', 'gstin', 'pinHash', 'status', 'isActive',
+               'createdAt', 'updatedAt'
+             ]) &&
+             isValidStr(data.shopId, 2, 64) &&
+             data.shopId.matches('^[a-zA-Z0-9_\\-]+$') &&
+             isValidStr(data.shopName, 1, 150) &&
+             isValidStr(data.ownerName, 1, 100) &&
+             isValidStr(data.email, 3, 120) &&
+             (!('ownerEmail' in data) || isValidStr(data.ownerEmail, 3, 120)) &&
+             (!('ownerUid' in data) || isValidStr(data.ownerUid, 0, 128)) &&
+             isValidStr(data.emailKey, 3, 128) &&
+             data.emailKey.matches('^[a-zA-Z0-9_\\-]+$') &&
+             isValidStr(data.phone, 5, 25) &&
+             isValidStr(data.address, 1, 300) &&
+             (!('gstin' in data) || isValidStr(data.gstin, 0, 30)) &&
+             isValidStr(data.pinHash, 16, 128) &&
+             data.status in ['active', 'inactive'] &&
+             data.isActive is bool &&
+             data.createdAt is timestamp &&
+             data.updatedAt is timestamp;
+    }
+
+    function isValidOwnerWorkspace(data) {
+      return data.keys().hasAll([
+               'email', 'emailKey', 'shopId', 'ownerName', 'shopName',
+               'status', 'createdAt', 'updatedAt'
+             ]) &&
+             data.keys().hasOnly([
+               'email', 'emailKey', 'shopId', 'ownerUid', 'ownerName', 'shopName',
+               'phone', 'address', 'gstin', 'tagline', 'taxRatePercent',
+               'currencySymbol', 'status', 'createdAt', 'updatedAt'
+             ]) &&
+             isValidStr(data.email, 3, 120) &&
+             isValidStr(data.emailKey, 3, 128) &&
+             data.emailKey.matches('^[a-zA-Z0-9_\\-]+$') &&
+             isValidStr(data.shopId, 2, 64) &&
+             (!('ownerUid' in data) || isValidStr(data.ownerUid, 0, 128)) &&
+             isValidStr(data.ownerName, 1, 100) &&
+             isValidStr(data.shopName, 1, 150) &&
+             (!('phone' in data) || isValidStr(data.phone, 0, 25)) &&
+             (!('address' in data) || isValidStr(data.address, 0, 300)) &&
+             (!('gstin' in data) || isValidStr(data.gstin, 0, 30)) &&
+             (!('tagline' in data) || isValidStr(data.tagline, 0, 150)) &&
+             (!('taxRatePercent' in data) || (data.taxRatePercent is number && data.taxRatePercent >= 0 && data.taxRatePercent <= 100)) &&
+             (!('currencySymbol' in data) || isValidStr(data.currencySymbol, 1, 10)) &&
+             data.status in ['active', 'inactive'] &&
+             data.createdAt is timestamp &&
+             data.updatedAt is timestamp;
+    }
+
+    function isValidShopItem(data) {
+      return data.keys().hasAll(['id', 'ownerEmail', 'name', 'price', 'stock', 'unit', 'updatedAt']) &&
+             data.keys().hasOnly(['id', 'shopId', 'ownerEmail', 'ownerUid', 'name', 'code', 'price', 'stock', 'category', 'unit', 'updatedAt']) &&
+             isValidStr(data.id, 1, 64) &&
+             (!('shopId' in data) || isValidStr(data.shopId, 2, 64)) &&
+             isValidStr(data.ownerEmail, 3, 120) &&
+             (!('ownerUid' in data) || isValidStr(data.ownerUid, 0, 128)) &&
+             isValidStr(data.name, 1, 150) &&
+             (!('code' in data) || isValidStr(data.code, 0, 40)) &&
+             data.price is number && data.price >= 0 &&
+             data.stock is number && data.stock >= 0 &&
+             (!('category' in data) || isValidStr(data.category, 0, 60)) &&
+             data.unit in ['pcs', 'kg'] &&
+             data.updatedAt is timestamp;
+    }
+
+    function isValidShopBill(data) {
+      return data.keys().hasAll(['id', 'ownerEmail', 'billNumber', 'subtotal', 'grandTotal', 'paymentMethod', 'createdAt']) &&
+             data.keys().hasOnly([
+               'id', 'shopId', 'ownerEmail', 'actorUid', 'billNumber', 'items', 'subtotal',
+               'discountAmount', 'taxAmount', 'grandTotal', 'paymentMethod',
+               'cashierName', 'customerName', 'customerPhone', 'createdAt'
+             ]) &&
+             isValidStr(data.id, 1, 64) &&
+             (!('shopId' in data) || isValidStr(data.shopId, 2, 64)) &&
+             isValidStr(data.ownerEmail, 3, 120) &&
+             (!('actorUid' in data) || isValidStr(data.actorUid, 1, 128)) &&
+             isValidStr(data.billNumber, 1, 40) &&
+             (!('items' in data) || (data.items is list && data.items.size() <= 100 && (data.items.size() == 0 || data.items[0] is map))) &&
+             data.subtotal is number && data.subtotal >= 0 &&
+             (!('discountAmount' in data) || (data.discountAmount is number && data.discountAmount >= 0)) &&
+             (!('taxAmount' in data) || (data.taxAmount is number && data.taxAmount >= 0)) &&
+             data.grandTotal is number && data.grandTotal >= 0 &&
+             data.paymentMethod in ['Cash', 'UPI', 'Card', 'Other'] &&
+             (!('cashierName' in data) || isValidStr(data.cashierName, 0, 100)) &&
+             (!('customerName' in data) || isValidStr(data.customerName, 0, 100)) &&
+             (!('customerPhone' in data) || isValidStr(data.customerPhone, 0, 25)) &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidAdmin(data) {
+      return data.keys().hasAll(['email', 'role', 'isActive', 'createdAt']) &&
+             data.keys().hasOnly(['email', 'role', 'isActive', 'createdAt']) &&
+             isValidStr(data.email, 3, 120) &&
+             data.role == 'super_admin' &&
+             data.isActive is bool &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['id', 'shopId', 'actorUid', 'actorEmail', 'actorRole', 'action', 'targetType', 'targetId', 'createdAt']) &&
+             data.keys().hasOnly([
+               'id', 'shopId', 'actorUid', 'actorEmail', 'actorRole',
+               'action', 'targetType', 'targetId', 'beforeData', 'afterData', 'createdAt'
+             ]) &&
+             isValidId(data.id) &&
+             isValidStr(data.shopId, 2, 64) &&
+             isValidStr(data.actorUid, 1, 128) &&
+             isValidStr(data.actorEmail, 3, 120) &&
+             data.actorRole in ['owner', 'employee', 'admin', 'system'] &&
+             isValidStr(data.action, 2, 64) &&
+             isValidStr(data.targetType, 2, 40) &&
+             isValidStr(data.targetId, 1, 128) &&
+             (!('beforeData' in data) || isValidStr(data.beforeData, 0, 2000)) &&
+             (!('afterData' in data) || isValidStr(data.afterData, 0, 2000)) &&
+             data.createdAt is timestamp;
+    }
+
+    // Users Collection (UID + shopId multi-tenant identity directory)
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (
+        isActiveSuperAdmin() ||
+        (isEmailVerified() && request.auth.uid == userId) ||
+        isShopOwner(existing().shopId)
+      );
+
+      allow list: if isEmailVerified() && (
+        existing().uid == request.auth.uid ||
+        existing().email.lower() == request.auth.token.email.lower()
+      );
+
+      allow create: if isValidId(userId) &&
+        isEmailVerified() &&
+        isValidUser(incoming()) &&
+        incoming().uid == userId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          isActiveSuperAdmin() ||
+          (request.auth.uid == userId &&
+           incoming().email.lower() == request.auth.token.email.lower() &&
+           incoming().role in ['owner', 'employee']) ||
+          (isShopOwner(incoming().shopId) && incoming().role == 'employee')
+        );
+
+      allow update: if isValidId(userId) &&
+        isEmailVerified() &&
+        isValidUser(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isActiveSuperAdmin() ||
+          (isShopOwner(existing().shopId) &&
+           existing().role == 'employee' &&
+           incoming().shopId == existing().shopId &&
+           incoming().role == 'employee' &&
+           incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'emailKey', 'isActive', 'updatedAt'])) ||
+          (request.auth.uid == userId &&
+           incoming().role == existing().role &&
+           incoming().shopId == existing().shopId &&
+           incoming().isActive == existing().isActive &&
+           incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'updatedAt']))
+        );
+
+      allow delete: if isValidId(userId) && (
+        isActiveSuperAdmin() ||
+        (isShopOwner(existing().shopId) && existing().role == 'employee')
+      );
+    }
+
+    // Shops Collection (Active super_admin registry; read by shop members)
+    match /shops/{shopId} {
+      allow get: if isValidId(shopId) && (
+        isActiveSuperAdmin() ||
+        isShopMember(shopId) ||
+        isEmailMatch(existing().email)
+      );
+
+      allow list: if isEmailVerified() && (
+        existing().ownerUid == request.auth.uid ||
+        existing().email.lower() == request.auth.token.email.lower()
+      );
+
+      allow create: if isValidId(shopId) &&
+        isActiveSuperAdmin() &&
+        isValidShop(incoming()) &&
+        incoming().shopId == shopId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isValidId(shopId) &&
+        isEmailVerified() &&
+        isValidShop(incoming()) &&
+        incoming().shopId == existing().shopId &&
+        incoming().emailKey == existing().emailKey &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isActiveSuperAdmin() ||
+          (isShopOwner(shopId) &&
+           incoming().diff(existing()).affectedKeys().hasOnly(['shopName', 'phone', 'address', 'gstin', 'ownerUid', 'updatedAt']))
+        );
+
+      allow delete: if isValidId(shopId) && isActiveSuperAdmin();
+    }
+
+    // Backward-compatible Per-Shop Workspaces indexed by emailKey
+    match /shop_owners/{emailKey} {
+      allow get: if isValidId(emailKey) && (
+        isActiveSuperAdmin() ||
+        isEmailMatch(existing().email) ||
+        isShopMember(existing().shopId)
+      );
+
+      allow list: if isEmailVerified() && (
+        existing().ownerUid == request.auth.uid ||
+        existing().email.lower() == request.auth.token.email.lower()
+      );
+
+      allow create: if isValidId(emailKey) &&
+        isEmailVerified() &&
+        isValidOwnerWorkspace(incoming()) &&
+        incoming().emailKey == emailKey &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          isActiveSuperAdmin() ||
+          isEmailMatch(incoming().email)
+        );
+
+      allow update: if isValidId(emailKey) &&
+        isEmailVerified() &&
+        isValidOwnerWorkspace(incoming()) &&
+        incoming().emailKey == existing().emailKey &&
+        incoming().email == existing().email &&
+        incoming().shopId == existing().shopId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isActiveSuperAdmin() ||
+          (isShopOwner(existing().shopId) &&
+           incoming().diff(existing()).affectedKeys().hasOnly([
+             'shopName', 'phone', 'address', 'gstin',
+             'tagline', 'taxRatePercent', 'currencySymbol', 'ownerUid', 'updatedAt'
+           ]))
+        );
+
+      allow delete: if isValidId(emailKey) && isActiveSuperAdmin();
+
+      // Shop Inventory Items Subcollection (Owner full write/delete; Employee read + stock deduction)
+      match /items/{itemId} {
+        allow get: if isValidId(emailKey) && isValidId(itemId) && isWorkspaceMember(emailKey);
+
+        allow list: if isEmailVerified() && (
+          existing().ownerEmail.lower() == request.auth.token.email.lower() ||
+          existing().ownerUid == request.auth.uid
+        );
+
+        allow create: if isValidId(emailKey) && isValidId(itemId) &&
+          isValidShopItem(incoming()) &&
+          incoming().id == itemId &&
+          incoming().updatedAt == request.time &&
+          exists(/databases/$(database)/documents/shop_owners/$(emailKey)) &&
+          isWorkspaceMember(emailKey);
+
+        allow update: if isValidId(emailKey) && isValidId(itemId) &&
+          isValidShopItem(incoming()) &&
+          incoming().id == existing().id &&
+          incoming().ownerEmail == existing().ownerEmail &&
+          incoming().updatedAt == request.time &&
+          exists(/databases/$(database)/documents/shop_owners/$(emailKey)) && (
+            (isWorkspaceOwner(emailKey) &&
+             incoming().diff(existing()).affectedKeys().hasOnly(['name', 'code', 'price', 'stock', 'category', 'unit', 'shopId', 'ownerUid', 'updatedAt'])) ||
+            (isWorkspaceMember(emailKey) &&
+             incoming().diff(existing()).affectedKeys().hasOnly(['stock', 'updatedAt']))
+          );
+
+        allow delete: if isValidId(emailKey) && isValidId(itemId) && isWorkspaceOwner(emailKey);
+      }
+
+      // Immutable Shop Bills Subcollection (Owner & active employee of shop can create/read; NO update/delete)
+      match /bills/{billId} {
+        allow get: if isValidId(emailKey) && isValidId(billId) && isWorkspaceMember(emailKey);
+
+        allow list: if isEmailVerified() && (
+          existing().ownerEmail.lower() == request.auth.token.email.lower() ||
+          existing().actorUid == request.auth.uid
+        );
+
+        allow create: if isValidId(emailKey) && isValidId(billId) &&
+          isValidShopBill(incoming()) &&
+          incoming().id == billId &&
+          incoming().createdAt == request.time &&
+          exists(/databases/$(database)/documents/shop_owners/$(emailKey)) &&
+          isWorkspaceMember(emailKey) &&
+          incoming().actorUid == request.auth.uid;
+
+        allow update, delete: if false;
+      }
+    }
+
+    // Admins Collection (Role-based active super_admin registry)
+    match /admins/{adminId} {
+      allow get: if isValidId(adminId) && (
+        isActiveSuperAdmin() ||
+        (isEmailVerified() && request.auth.uid == adminId)
+      );
+
+      allow list: if isEmailVerified() &&
+        existing().email.lower() == request.auth.token.email.lower();
+
+      allow create, update, delete: if isValidId(adminId) &&
+        isActiveSuperAdmin() &&
+        isValidAdmin(incoming()) &&
+        incoming().createdAt == request.time;
+    }
+
+    // Immutable Audit Logs Collection
+    match /audit_logs/{logId} {
+      allow get: if isValidId(logId) && (
+        isActiveSuperAdmin() ||
+        isShopOwner(existing().shopId)
+      );
+
+      allow list: if isEmailVerified() &&
+        existing().actorUid == request.auth.uid;
+
+      allow create: if isValidId(logId) &&
+        isEmailVerified() &&
+        isValidAuditLog(incoming()) &&
+        incoming().id == logId &&
+        incoming().actorUid == request.auth.uid &&
+        incoming().createdAt == request.time && (
+          isActiveSuperAdmin() ||
+          isShopMember(incoming().shopId)
+        );
+
+      allow update, delete: if false;
+    }
+  }
+}

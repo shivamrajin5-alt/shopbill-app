@@ -1,0 +1,277 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Authenticated user profile indexed by Firebase UID supporting owner, employee, and admin roles linked via shopId.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "description": "Normalized lowercase user email",
+          "maxLength": 120
+        },
+        "emailKey": {
+          "type": "string",
+          "description": "Deterministic email key",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Full display name",
+          "maxLength": 100
+        },
+        "role": {
+          "type": "string",
+          "description": "Role within ShopBill",
+          "enum": ["owner", "employee", "admin"]
+        },
+        "shopId": {
+          "type": "string",
+          "description": "Assigned Shop ID (or GLOBAL for admin)",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "isActive": {
+          "type": "boolean",
+          "description": "Whether account is active"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "emailKey", "displayName", "role", "shopId", "isActive", "createdAt", "updatedAt"]
+    },
+    "Shop": {
+      "title": "Shop",
+      "description": "Registered shop profile with ownerUid, ownerEmail, email index, status, and salted bcrypt PIN hash.",
+      "type": "object",
+      "properties": {
+        "shopId": {
+          "type": "string",
+          "description": "Unique identifier for the shop (e.g., SB-4829)",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "shopName": {
+          "type": "string",
+          "description": "Business or store name",
+          "maxLength": 150
+        },
+        "ownerName": {
+          "type": "string",
+          "description": "Full name of the shop owner",
+          "maxLength": 100
+        },
+        "ownerEmail": {
+          "type": "string",
+          "description": "Normalized lowercase email address of the shop owner",
+          "maxLength": 120
+        },
+        "email": {
+          "type": "string",
+          "description": "Backward-compatible owner email field",
+          "maxLength": 120
+        },
+        "ownerUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the shop owner",
+          "maxLength": 128
+        },
+        "emailKey": {
+          "type": "string",
+          "description": "URL/Firestore-safe identifier derived from the shop owner's email",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "phone": {
+          "type": "string",
+          "description": "Contact phone number",
+          "maxLength": 25
+        },
+        "address": {
+          "type": "string",
+          "description": "Store location / address",
+          "maxLength": 300
+        },
+        "gstin": {
+          "type": "string",
+          "description": "Optional GSTIN / tax identification number",
+          "maxLength": 30
+        },
+        "pinHash": {
+          "type": "string",
+          "description": "Salted bcrypt hash of the staff PIN",
+          "maxLength": 128
+        },
+        "status": {
+          "type": "string",
+          "description": "Operational status",
+          "enum": ["active", "inactive"]
+        },
+        "isActive": {
+          "type": "boolean",
+          "description": "Convenience flag for operational permission"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "shopId",
+        "shopName",
+        "ownerName",
+        "email",
+        "emailKey",
+        "phone",
+        "address",
+        "pinHash",
+        "status",
+        "isActive",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "OwnerWorkspace": {
+      "title": "OwnerWorkspace",
+      "description": "Shop workspace indexed by normalized emailKey with backward compatibility and ownerUid + shopId linkage.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "maxLength": 120 },
+        "emailKey": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "shopId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "ownerName": { "type": "string", "maxLength": 100 },
+        "shopName": { "type": "string", "maxLength": 150 },
+        "phone": { "type": "string", "maxLength": 25 },
+        "address": { "type": "string", "maxLength": 300 },
+        "gstin": { "type": "string", "maxLength": 30 },
+        "tagline": { "type": "string", "maxLength": 150 },
+        "taxRatePercent": { "type": "number" },
+        "currencySymbol": { "type": "string", "maxLength": 10 },
+        "status": { "type": "string", "enum": ["active", "inactive"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "emailKey", "shopId", "ownerName", "shopName", "status", "createdAt", "updatedAt"]
+    },
+    "ShopItem": {
+      "title": "ShopItem",
+      "description": "Inventory item scoped to a shop workspace.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "shopId": { "type": "string", "maxLength": 64 },
+        "ownerEmail": { "type": "string", "maxLength": 120 },
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 150 },
+        "code": { "type": "string", "maxLength": 40 },
+        "price": { "type": "number" },
+        "stock": { "type": "number" },
+        "category": { "type": "string", "maxLength": 60 },
+        "unit": { "type": "string", "enum": ["pcs", "kg"] },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerEmail", "name", "price", "stock", "unit", "updatedAt"]
+    },
+    "ShopBill": {
+      "title": "ShopBill",
+      "description": "Immutable bill/invoice scoped to a shop workspace.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "shopId": { "type": "string", "maxLength": 64 },
+        "ownerEmail": { "type": "string", "maxLength": 120 },
+        "actorUid": { "type": "string", "maxLength": 128 },
+        "billNumber": { "type": "string", "maxLength": 40 },
+        "subtotal": { "type": "number" },
+        "discountAmount": { "type": "number" },
+        "taxAmount": { "type": "number" },
+        "grandTotal": { "type": "number" },
+        "paymentMethod": { "type": "string", "enum": ["Cash", "UPI", "Card", "Other"] },
+        "cashierName": { "type": "string", "maxLength": 100 },
+        "customerName": { "type": "string", "maxLength": 100 },
+        "customerPhone": { "type": "string", "maxLength": 25 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerEmail", "billNumber", "subtotal", "grandTotal", "paymentMethod", "createdAt"]
+    },
+    "Admin": {
+      "title": "Admin",
+      "description": "Active super_admin account indexed by Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["super_admin"] },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "role", "isActive", "createdAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable security & operational audit log entry.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 80 },
+        "shopId": { "type": "string", "maxLength": 64 },
+        "actorUid": { "type": "string", "maxLength": 128 },
+        "actorEmail": { "type": "string", "maxLength": 120 },
+        "actorRole": { "type": "string", "enum": ["owner", "employee", "admin", "system"] },
+        "action": { "type": "string", "maxLength": 64 },
+        "targetType": { "type": "string", "maxLength": 40 },
+        "targetId": { "type": "string", "maxLength": 128 },
+        "beforeData": { "type": "string", "maxLength": 2000 },
+        "afterData": { "type": "string", "maxLength": 2000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "shopId", "actorUid", "actorEmail", "actorRole", "action", "targetType", "targetId", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Role-based user directory indexed by Firebase Auth UID."
+    },
+    "/shops/{shopId}": {
+      "schema": { "$ref": "#/entities/Shop" },
+      "description": "Collection of all multi-tenant shops registered in the system."
+    },
+    "/shop_owners/{emailKey}": {
+      "schema": { "$ref": "#/entities/OwnerWorkspace" },
+      "description": "Per-shop workspace document keyed by normalized owner emailKey."
+    },
+    "/shop_owners/{emailKey}/items/{itemId}": {
+      "schema": { "$ref": "#/entities/ShopItem" },
+      "description": "Inventory items belonging to a shop."
+    },
+    "/shop_owners/{emailKey}/bills/{billId}": {
+      "schema": { "$ref": "#/entities/ShopBill" },
+      "description": "Immutable invoices/bills belonging to a shop."
+    },
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/Admin" },
+      "description": "Collection of active super_admin accounts keyed by Firebase UID."
+    },
+    "/audit_logs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Immutable audit trail for security & operational events."
+    }
+  }
+}

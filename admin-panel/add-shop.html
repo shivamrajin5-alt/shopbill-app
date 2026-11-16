@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Register Shop Owner - BillKart Admin</title>
+  <link rel="icon" type="image/png" href="/assets/aistudio/BillKart_Green_Cart_Logo_beb258ac.png">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+</head>
+<body class="dashboard-body">
+  <div class="layout-wrapper">
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <div class="brand">
+          <div class="brand-icon">
+            <img src="/assets/aistudio/BillKart_Green_Cart_Logo_beb258ac.png" alt="BillKart Logo" />
+          </div>
+          <div class="brand-text">
+            <h3>BillKart</h3>
+            <span>Admin Console</span>
+          </div>
+        </div>
+        <button id="closeSidebarBtn" class="mobile-close-btn" aria-label="Close sidebar">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
+
+      <nav class="sidebar-nav">
+        <a href="dashboard.html" class="nav-item">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect width="7" height="9" x="3" y="3" rx="1"/>
+            <rect width="7" height="5" x="14" y="3" rx="1"/>
+            <rect width="7" height="9" x="14" y="12" rx="1"/>
+            <rect width="7" height="5" x="3" y="16" rx="1"/>
+          </svg>
+          <span>Dashboard</span>
+        </a>
+        <a href="shops.html" class="nav-item">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="m2 7 4.41-4.41A2 2 0 0 1 7.83 2h8.34a2 2 0 0 1 1.42.59L22 7"/>
+            <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/>
+            <path d="M15 22v-4a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v4"/>
+            <path d="M2 7h20"/>
+          </svg>
+          <span>All Shops</span>
+        </a>
+        <a href="add-shop.html" class="nav-item active">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="12" y1="8" x2="12" y2="16"/>
+            <line x1="8" y1="12" x2="16" y2="12"/>
+          </svg>
+          <span>Register New Shop</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="admin-pill">
+          <div class="avatar" id="adminAvatar">A</div>
+          <div class="admin-details">
+            <span class="admin-name" id="adminEmailDisplay">Admin</span>
+            <span class="admin-badge">Super Admin</span>
+          </div>
+        </div>
+        <button id="logoutBtn" class="logout-btn" title="Sign Out">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+            <polyline points="16 17 21 12 16 7"/>
+            <line x1="21" y1="12" x2="9" y2="12"/>
+          </svg>
+          <span>Sign Out</span>
+        </button>
+      </div>
+    </aside>
+
+    <div id="sidebarOverlay" class="sidebar-overlay"></div>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+      <!-- Top Navigation Bar -->
+      <header class="topbar">
+        <div class="topbar-left">
+          <button id="mobileMenuBtn" class="mobile-menu-btn" aria-label="Open navigation menu">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="3" y1="12" x2="21" y2="12"/>
+              <line x1="3" y1="6" x2="21" y2="6"/>
+              <line x1="3" y1="18" x2="21" y2="18"/>
+            </svg>
+          </button>
+          <div>
+            <h1 class="page-title">Register Shop Owner</h1>
+            <p class="page-subtitle">Automatically generate Shop ID, secure PIN, and create store account</p>
+          </div>
+        </div>
+        <div class="topbar-right">
+          <a href="shops.html" class="btn btn-outline btn-sm">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="19" y1="12" x2="5" y2="12"/>
+              <polyline points="12 19 5 12 12 5"/>
+            </svg>
+            <span>Back to All Shops</span>
+          </a>
+        </div>
+      </header>
+
+      <!-- Content Container -->
+      <div class="content-container max-w-form">
+        <!-- Success Modal / Card (Shown after registration) -->
+        <div id="successCard" class="card success-card hidden">
+          <div class="success-header">
+            <div class="success-icon">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                <polyline points="22 4 12 14.01 9 11.01"/>
+              </svg>
+            </div>
+            <div>
+              <h3>Shop Owner Registered Successfully!</h3>
+              <p>Account and credentials have been created in Firebase.</p>
+            </div>
+          </div>
+
+          <div class="credentials-summary-box">
+            <div class="cred-row">
+              <span class="cred-label">Shop ID:</span>
+              <strong class="cred-val badge-code" id="resShopId"></strong>
+            </div>
+            <div class="cred-row">
+              <span class="cred-label">Shop Name:</span>
+              <span class="cred-val" id="resShopName"></span>
+            </div>
+            <div class="cred-row">
+              <span class="cred-label">Owner Name:</span>
+              <span class="cred-val" id="resOwnerName"></span>
+            </div>
+            <div class="cred-row">
+              <span class="cred-label">Owner Email:</span>
+              <span class="cred-val" id="resEmail"></span>
+            </div>
+            <div class="cred-row highlight">
+              <span class="cred-label">Plaintext PIN (Save Now):</span>
+              <strong class="cred-val pin-highlight font-mono" id="resPin"></strong>
+            </div>
+            <div class="cred-row">
+              <span class="cred-label">Firestore PIN Hash:</span>
+              <span class="cred-val hash-text font-mono" id="resHash"></span>
+            </div>
+          </div>
+
+          <div class="success-actions">
+            <button type="button" id="copyCredentialsBtn" class="btn btn-primary">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
+                <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
+              </svg>
+              <span>Copy All Credentials</span>
+            </button>
+            <a href="shops.html" class="btn btn-outline">
+              <span>View in All Shops</span>
+            </a>
+            <button type="button" id="registerAnotherBtn" class="btn btn-secondary">
+              <span>Register Another Shop</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Registration Form Card -->
+        <div id="formCard" class="card">
+          <form id="addShopForm" novalidate>
+            <!-- Auto-Generated Identifiers Section -->
+            <div class="form-section">
+              <div class="section-title">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
+                </svg>
+                <h4>Auto-Generated Credentials</h4>
+              </div>
+
+              <div class="form-row-2">
+                <!-- Shop ID -->
+                <div class="form-group">
+                  <div class="label-row">
+                    <label for="shopIdInput">Generated Shop ID *</label>
+                    <button type="button" id="regenerateIdBtn" class="link-btn-sm">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                        <path d="M3 3v5h5"/>
+                        <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/>
+                        <path d="M16 21h5v-5"/>
+                      </svg>
+                      <span>Regenerate ID</span>
+                    </button>
+                  </div>
+                  <div class="input-wrapper">
+                    <input 
+                      type="text" 
+                      id="shopIdInput" 
+                      class="font-mono text-bold bg-muted" 
+                      readonly 
+                      required 
+                    />
+                  </div>
+                  <span class="field-hint">Unique identifier for the store in Firestore.</span>
+                </div>
+
+                <!-- Secure PIN Generator -->
+                <div class="form-group">
+                  <div class="label-row">
+                    <label for="shopPinInput">Secure Staff PIN (4 Digits) *</label>
+                    <button type="button" id="regeneratePinBtn" class="link-btn-sm">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="m13 2-2 10h6l-3 10"/>
+                      </svg>
+                      <span>Generate Random PIN</span>
+                    </button>
+                  </div>
+                  <div class="input-wrapper">
+                    <input 
+                      type="text" 
+                      id="shopPinInput" 
+                      maxlength="6"
+                      class="font-mono text-bold text-lg" 
+                      required 
+                    />
+                    <button type="button" id="copyPinBtn" class="icon-btn" title="Copy PIN">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
+                        <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
+                      </svg>
+                    </button>
+                  </div>
+                  <span class="field-hint" id="pinHashPreview">Salted Bcrypt hash will be generated on save</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="divider"></div>
+
+            <!-- Shop Details Section -->
+            <div class="form-section">
+              <div class="section-title">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="m2 7 4.41-4.41A2 2 0 0 1 7.83 2h8.34a2 2 0 0 1 1.42.59L22 7"/>
+                  <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/>
+                  <path d="M15 22v-4a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v4"/>
+                  <path d="M2 7h20"/>
+                </svg>
+                <h4>Shop Information</h4>
+              </div>
+
+              <div class="form-row-2">
+                <div class="form-group">
+                  <label for="shopName">Shop / Store Name *</label>
+                  <input type="text" id="shopName" placeholder="e.g. QuickMart Superstore" required />
+                </div>
+
+                <div class="form-group">
+                  <label for="gstin">GSTIN / Tax ID (Optional)</label>
+                  <input type="text" id="gstin" placeholder="e.g. 27ABCDE1234F1Z5" class="font-mono" />
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label for="address">Full Shop Address *</label>
+                <textarea id="address" rows="2" placeholder="e.g. Shop No. 12, Market Square, Central Plaza" required></textarea>
+              </div>
+            </div>
+
+            <div class="divider"></div>
+
+            <!-- Owner Credentials Section -->
+            <div class="form-section">
+              <div class="section-title">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/>
+                  <circle cx="12" cy="7" r="4"/>
+                </svg>
+                <h4>Owner Account Details</h4>
+              </div>
+
+              <div class="form-row-2">
+                <div class="form-group">
+                  <label for="ownerName">Owner Full Name *</label>
+                  <input type="text" id="ownerName" placeholder="e.g. Rajesh Sharma" required />
+                </div>
+
+                <div class="form-group">
+                  <label for="phone">Phone Number *</label>
+                  <input type="tel" id="phone" placeholder="e.g. +91 98765 43210" required />
+                </div>
+              </div>
+
+              <div class="form-row-2">
+                <div class="form-group">
+                  <label for="email">Owner Email Address *</label>
+                  <input type="email" id="email" placeholder="e.g. owner@quickmart.in" required />
+                  <span class="field-hint">Used for Firebase Auth account registration.</span>
+                </div>
+
+                <div class="form-group">
+                  <label for="initialStatus">Initial Status</label>
+                  <select id="initialStatus">
+                    <option value="active" selected>Active (Operational)</option>
+                    <option value="inactive">Deactivated (Suspended)</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div class="form-actions">
+              <a href="shops.html" class="btn btn-outline">Cancel</a>
+              <button type="submit" id="submitBtn" class="btn btn-primary">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                  <polyline points="17 21 17 13 7 13 7 21"/>
+                  <polyline points="7 3 7 8 15 8"/>
+                </svg>
+                <span class="btn-text">Register Shop Owner in Firebase</span>
+                <span class="btn-loader hidden"></span>
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <div id="toastContainer" class="toast-container"></div>
+
+  <script type="module">
+    import { requireAuth, logoutAdmin } from './js/auth.js';
+    import { registerShop } from './js/shops.js';
+    import { generateShopId, generateSecurePin, hashPin, showToast, copyToClipboard } from './js/utils.js';
+
+    const shopIdInput = document.getElementById('shopIdInput');
+    const shopPinInput = document.getElementById('shopPinInput');
+    const pinHashPreview = document.getElementById('pinHashPreview');
+    const addShopForm = document.getElementById('addShopForm');
+    const submitBtn = document.getElementById('submitBtn');
+
+    // Initialize Auto-Generated Fields
+    async function initForm() {
+      shopIdInput.value = generateShopId();
+      shopPinInput.value = generateSecurePin(4);
+      updateHashPreview();
+    }
+
+    // Protect Page
+    requireAuth((user) => {
+      document.getElementById('adminEmailDisplay').textContent = user.email || 'Admin';
+      document.getElementById('adminAvatar').textContent = (user.email || 'A')[0].toUpperCase();
+      initForm();
+    });
+
+    // Mobile Sidebar
+    const sidebar = document.getElementById('sidebar');
+    const sidebarOverlay = document.getElementById('sidebarOverlay');
+    document.getElementById('mobileMenuBtn')?.addEventListener('click', () => {
+      sidebar.classList.add('open');
+      sidebarOverlay.classList.add('visible');
+    });
+    const closeSidebar = () => {
+      sidebar.classList.remove('open');
+      sidebarOverlay.classList.remove('visible');
+    };
+    document.getElementById('closeSidebarBtn')?.addEventListener('click', closeSidebar);
+    sidebarOverlay?.addEventListener('click', closeSidebar);
+
+    // Logout
+    document.getElementById('logoutBtn').addEventListener('click', async () => {
+      if (confirm('Are you sure you want to sign out?')) {
+        await logoutAdmin();
+        window.location.replace('login.html');
+      }
+    });
+
+    async function updateHashPreview() {
+      const pin = shopPinInput.value.trim();
+      if (pin) {
+        pinHashPreview.textContent = `Ready: salted Bcrypt ($2b$10$) will be generated securely on save`;
+      } else {
+        pinHashPreview.textContent = 'Enter 4-6 digit PIN to generate salted Bcrypt hash';
+      }
+    }
+
+    // Regenerate ID
+    document.getElementById('regenerateIdBtn').addEventListener('click', () => {
+      shopIdInput.value = generateShopId();
+      showToast('Generated new unique Shop ID', 'info');
+    });
+
+    // Regenerate PIN
+    document.getElementById('regeneratePinBtn').addEventListener('click', () => {
+      shopPinInput.value = generateSecurePin(4);
+      updateHashPreview();
+      showToast('Generated new secure 4-digit PIN', 'info');
+    });
+
+    shopPinInput.addEventListener('input', updateHashPreview);
+
+    // Copy PIN button
+    document.getElementById('copyPinBtn').addEventListener('click', async () => {
+      const pin = shopPinInput.value;
+      if (pin) {
+        await copyToClipboard(pin);
+        showToast('PIN copied to clipboard: ' + pin, 'success');
+      }
+    });
+
+    // Handle Form Submit
+    addShopForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+
+      const shopId = shopIdInput.value.trim();
+      const pin = shopPinInput.value.trim();
+      const shopName = document.getElementById('shopName').value.trim();
+      const gstin = document.getElementById('gstin').value.trim();
+      const address = document.getElementById('address').value.trim();
+      const ownerName = document.getElementById('ownerName').value.trim();
+      const phone = document.getElementById('phone').value.trim();
+      const email = document.getElementById('email').value.trim();
+      const status = document.getElementById('initialStatus').value;
+
+      if (!shopId || !pin || !shopName || !address || !ownerName || !phone || !email) {
+        showToast('Please fill out all required fields marked with *', 'error');
+        return;
+      }
+
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        showToast('Please enter a valid individual owner email address.', 'error');
+        return;
+      }
+
+      if (pin.length < 4) {
+        showToast('PIN must be at least 4 digits.', 'error');
+        return;
+      }
+
+      setLoading(true);
+
+      try {
+        const result = await registerShop({
+          shopId,
+          pin,
+          shopName,
+          gstin,
+          address,
+          ownerName,
+          phone,
+          email,
+          status,
+        });
+
+        // Show Success Result Card
+        document.getElementById('resShopId').textContent = result.shopId;
+        document.getElementById('resShopName').textContent = result.shopName;
+        document.getElementById('resOwnerName').textContent = result.ownerName;
+        document.getElementById('resEmail').textContent = result.email;
+        document.getElementById('resPin').textContent = pin;
+        document.getElementById('resHash').textContent = result.pinHash;
+
+        document.getElementById('formCard').classList.add('hidden');
+        document.getElementById('successCard').classList.remove('hidden');
+
+        showToast(`Shop registered and saved under ${result.email}!`, 'success');
+
+        // Copy All Credentials handler
+        document.getElementById('copyCredentialsBtn').onclick = async () => {
+          const text = `
+=== BillKart Store Credentials ===
+Shop ID: ${result.shopId}
+Store Name: ${result.shopName}
+Owner Name: ${result.ownerName}
+Email: ${result.email}
+Phone: ${result.phone}
+Staff PIN: ${pin}
+Status: ${status.toUpperCase()}
+==================================
+`;
+          await copyToClipboard(text);
+          showToast('All shop credentials copied to clipboard!', 'success');
+        };
+
+        // Register Another Handler
+        document.getElementById('registerAnotherBtn').onclick = () => {
+          addShopForm.reset();
+          initForm();
+          document.getElementById('successCard').classList.add('hidden');
+          document.getElementById('formCard').classList.remove('hidden');
+        };
+      } catch (err) {
+        console.error('Registration failed:', err);
+        showToast('Failed to register shop: ' + err.message, 'error');
+      } finally {
+        setLoading(false);
+      }
+    });
+
+    function setLoading(isLoading) {
+      if (isLoading) {
+        submitBtn.disabled = true;
+        submitBtn.querySelector('.btn-text').classList.add('hidden');
+        submitBtn.querySelector('.btn-loader').classList.remove('hidden');
+      } else {
+        submitBtn.disabled = false;
+        submitBtn.querySelector('.btn-text').classList.remove('hidden');
+        submitBtn.querySelector('.btn-loader').classList.add('hidden');
+      }
+    }
+  </script>
+</body>
+</html>

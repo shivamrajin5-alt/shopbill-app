@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BillKart Admin Panel - Loading</title>
+  <link rel="icon" type="image/png" href="/assets/aistudio/BillKart_Green_Cart_Logo_beb258ac.png">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="loading-body">
+  <div class="splash-loader">
+    <div class="spinner"></div>
+    <h2>BillKart Admin Console</h2>
+    <p>Checking authentication...</p>
+  </div>
+
+  <script type="module">
+    import { checkAuthStatus } from './js/auth.js';
+
+    // Route to dashboard if logged in, else login.html
+    checkAuthStatus((user) => {
+      if (user) {
+        window.location.replace('dashboard.html');
+      } else {
+        window.location.replace('login.html');
+      }
+    });
+  </script>
+</body>
+</html>

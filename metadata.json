@@ -1,0 +1,6 @@
+{
+  "name": "ShopBill - POS & Billing App",
+  "description": "Clean Material 3 Android billing and POS app for shop owners and employees with in-memory management, quick billing, receipts, and sales reports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
