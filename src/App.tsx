@@ -341,6 +341,14 @@ type AppScreen =
   | 'admin_panel'
   | 'admin_audit_logs';
 
+function isRunningInIframe(): boolean {
+  try {
+    return typeof window !== 'undefined' && window.self !== window.top;
+  } catch (_) {
+    return true;
+  }
+}
+
 export function formatQtyDisplay(quantity: number, unit: ItemUnit = 'pcs'): string {
   if (unit === 'kg') {
     if (quantity < 1 && quantity > 0) {
@@ -1114,12 +1122,14 @@ class Item {
                       if (freshShops.length > 0) setShopOwners(freshShops);
                       let synced = 0;
                       let firstError: string | undefined;
-                      for (const shop of freshShops) {
-                        try {
-                          const ok = await ensureOwnerWorkspaceInFirestore(shop);
-                          if (ok) synced += 1;
-                        } catch (err) {
-                          if (!firstError) firstError = formatCloudSyncError(err);
+                      const results = await Promise.allSettled(
+                        freshShops.map((shop) => ensureOwnerWorkspaceInFirestore(shop))
+                      );
+                      for (const r of results) {
+                        if (r.status === 'fulfilled' && r.value) {
+                          synced += 1;
+                        } else if (r.status === 'rejected' && !firstError) {
+                          firstError = formatCloudSyncError(r.reason);
                         }
                       }
                       return { connected: true, synced, error: firstError };
@@ -1129,14 +1139,12 @@ class Item {
                       if (freshShops.length > 0) setShopOwners(freshShops);
                       let synced = 0;
                       let failed = 0;
-                      for (const shop of freshShops) {
-                        try {
-                          const ok = await ensureOwnerWorkspaceInFirestore(shop);
-                          if (ok) synced += 1;
-                          else failed += 1;
-                        } catch (_) {
-                          failed += 1;
-                        }
+                      const results = await Promise.allSettled(
+                        freshShops.map((shop) => ensureOwnerWorkspaceInFirestore(shop))
+                      );
+                      for (const r of results) {
+                        if (r.status === 'fulfilled' && r.value) synced += 1;
+                        else failed += 1;
                       }
                       return { synced, failed };
                     }}
@@ -2424,23 +2432,36 @@ function HomeScreenView({
           )}
         </div>
         {isOnline && !isSyncing && (
-          <button
-            type="button"
-            onClick={isWrongGoogleEmail ? onSwitchGoogleAccount : onSyncNow}
-            className={`px-2 py-0.5 rounded text-white font-bold text-[10px] shrink-0 ${
-              lastSyncError
-                ? 'bg-red-700 hover:bg-red-800'
-                : !hasCloudAuth
-                  ? 'bg-amber-700 hover:bg-amber-800'
-                  : 'bg-sky-700 hover:bg-sky-800'
-            }`}
-          >
-            {isWrongGoogleEmail
-              ? 'Switch Gmail'
-              : hasCloudAuth
-                ? 'Sync Now'
-                : 'Sign In & Sync'}
-          </button>
+          <div className="flex items-center gap-1 shrink-0">
+            {!hasCloudAuth && isRunningInIframe() && typeof window !== 'undefined' && (
+              <a
+                href={window.location.href}
+                target="_blank"
+                rel="noopener noreferrer"
+                title="Open in a standalone browser tab for reliable Google Sign-In"
+                className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-900 text-white font-bold text-[10px]"
+              >
+                New Tab ↗
+              </a>
+            )}
+            <button
+              type="button"
+              onClick={isWrongGoogleEmail ? onSwitchGoogleAccount : onSyncNow}
+              className={`px-2 py-0.5 rounded text-white font-bold text-[10px] ${
+                lastSyncError
+                  ? 'bg-red-700 hover:bg-red-800'
+                  : !hasCloudAuth
+                    ? 'bg-amber-700 hover:bg-amber-800'
+                    : 'bg-sky-700 hover:bg-sky-800'
+              }`}
+            >
+              {isWrongGoogleEmail
+                ? 'Switch Gmail'
+                : hasCloudAuth
+                  ? 'Sync Now'
+                  : 'Sign In & Sync'}
+            </button>
+          </div>
         )}
       </div>
 
@@ -5025,17 +5046,39 @@ function AdminPanelScreenView({
         </div>
 
         {adminNotice && (
-          <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl text-[11px] text-emerald-900 font-medium flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+          <div
+            className={`p-2.5 border rounded-xl text-[11px] font-medium flex items-center gap-2 ${
+              /error|failed|denied|authorized|popup|blocked|warning/i.test(adminNotice)
+                ? 'bg-red-50 border-red-200 text-red-900'
+                : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+            }`}
+          >
+            {/error|failed|denied|authorized|popup|blocked|warning/i.test(adminNotice) ? (
+              <ShieldAlert className="w-4 h-4 text-red-600 shrink-0" />
+            ) : (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            )}
             <span>{adminNotice}</span>
           </div>
         )}
 
         {!cloudUserEmail && (
-          <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-[11px] text-amber-900 font-medium flex items-center justify-between gap-2">
-            <span>
-              Connect Google above so newly registered shops upload to Cloud Firestore and work on Phone &amp; other devices.
+          <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-[11px] text-amber-900 font-medium flex items-center justify-between gap-2 flex-wrap">
+            <span className="flex-1 min-w-[180px]">
+              {isRunningInIframe()
+                ? 'Running inside Preview frame: open BillKart in a new tab before clicking Connect Google & Sync so Edge/Chrome does not freeze the popup.'
+                : 'Connect Google above so newly registered shops upload to Cloud Firestore and work on Phone & other devices.'}
             </span>
+            {isRunningInIframe() && typeof window !== 'undefined' && (
+              <a
+                href={window.location.href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-[10px] font-bold shrink-0"
+              >
+                Open in New Tab ↗
+              </a>
+            )}
           </div>
         )}
 

@@ -2,9 +2,6 @@ import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
 import {
   getFirestore,
-  initializeFirestore,
-  persistentLocalCache,
-  persistentMultipleTabManager,
   collection,
   doc,
   getDoc,
@@ -46,28 +43,45 @@ export interface FirestoreErrorInfo {
   };
 }
 
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
+const viteEnv =
+  (import.meta as unknown as { env?: Record<string, string | undefined> }).env || {};
 
-function createPersistentFirestore(): Firestore {
-  try {
-    if (typeof window !== 'undefined') {
-      return initializeFirestore(
-        app,
-        {
-          localCache: persistentLocalCache({
-            tabManager: persistentMultipleTabManager(),
-          }),
-        },
-        firebaseConfig.firestoreDatabaseId
-      );
-    }
-  } catch (_) {
-    // Fallback when Firestore is already initialized or IndexedDB unavailable
-  }
-  return getFirestore(app, firebaseConfig.firestoreDatabaseId);
-}
+const resolvedFirebaseConfig = {
+  ...firebaseConfig,
+  ...(viteEnv.VITE_FIREBASE_API_KEY?.trim()
+    ? { apiKey: viteEnv.VITE_FIREBASE_API_KEY.trim() }
+    : {}),
+  ...(viteEnv.VITE_FIREBASE_AUTH_DOMAIN?.trim()
+    ? { authDomain: viteEnv.VITE_FIREBASE_AUTH_DOMAIN.trim() }
+    : {}),
+  ...(viteEnv.VITE_FIREBASE_PROJECT_ID?.trim()
+    ? { projectId: viteEnv.VITE_FIREBASE_PROJECT_ID.trim() }
+    : {}),
+  ...(viteEnv.VITE_FIREBASE_APP_ID?.trim()
+    ? { appId: viteEnv.VITE_FIREBASE_APP_ID.trim() }
+    : {}),
+  ...(viteEnv.VITE_FIREBASE_STORAGE_BUCKET?.trim()
+    ? { storageBucket: viteEnv.VITE_FIREBASE_STORAGE_BUCKET.trim() }
+    : {}),
+  ...(viteEnv.VITE_FIREBASE_MESSAGING_SENDER_ID?.trim()
+    ? { messagingSenderId: viteEnv.VITE_FIREBASE_MESSAGING_SENDER_ID.trim() }
+    : {}),
+  ...(viteEnv.VITE_FIREBASE_DATABASE_ID?.trim()
+    ? { firestoreDatabaseId: viteEnv.VITE_FIREBASE_DATABASE_ID.trim() }
+    : {}),
+};
 
-export const db = createPersistentFirestore();
+const targetDatabaseId =
+  resolvedFirebaseConfig.firestoreDatabaseId &&
+  resolvedFirebaseConfig.firestoreDatabaseId !== '(default)'
+    ? resolvedFirebaseConfig.firestoreDatabaseId
+    : undefined;
+
+const app = getApps().length === 0 ? initializeApp(resolvedFirebaseConfig) : getApp();
+
+export const db: Firestore = targetDatabaseId
+  ? getFirestore(app, targetDatabaseId)
+  : getFirestore(app);
 export const auth = getAuth(app);
 
 export function handleFirestoreError(
@@ -106,12 +120,19 @@ async function testConnection() {
   }
 }
 if (typeof window !== 'undefined') {
-  testConnection();
+  window.setTimeout(() => {
+    void testConnection();
+  }, 800);
 }
 
 async function getDocPreferServer(ref: ReturnType<typeof doc>) {
   try {
-    return await getDocFromServer(ref);
+    return await Promise.race([
+      getDocFromServer(ref),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Firestore server check timed out')), 4500)
+      ),
+    ]);
   } catch (_) {
     return await getDoc(ref);
   }

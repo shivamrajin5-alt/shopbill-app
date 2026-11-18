@@ -133,14 +133,50 @@ async function createServer() {
     res.json({ ok: true, database: 'sqlite', timestamp: new Date().toISOString() });
   });
 
+  const resolveFirebaseServerConfig = (): Record<string, string> | null => {
+    let base: Record<string, string> = {};
+    if (fs.existsSync(firebaseConfigPath)) {
+      base = JSON.parse(fs.readFileSync(firebaseConfigPath, 'utf-8')) as Record<string, string>;
+    }
+    const merged: Record<string, string> = {
+      ...base,
+      ...(process.env.VITE_FIREBASE_API_KEY?.trim()
+        ? { apiKey: process.env.VITE_FIREBASE_API_KEY.trim() }
+        : {}),
+      ...(process.env.VITE_FIREBASE_AUTH_DOMAIN?.trim()
+        ? { authDomain: process.env.VITE_FIREBASE_AUTH_DOMAIN.trim() }
+        : {}),
+      ...(process.env.VITE_FIREBASE_PROJECT_ID?.trim()
+        ? { projectId: process.env.VITE_FIREBASE_PROJECT_ID.trim() }
+        : {}),
+      ...(process.env.VITE_FIREBASE_APP_ID?.trim()
+        ? { appId: process.env.VITE_FIREBASE_APP_ID.trim() }
+        : {}),
+      ...(process.env.VITE_FIREBASE_STORAGE_BUCKET?.trim()
+        ? { storageBucket: process.env.VITE_FIREBASE_STORAGE_BUCKET.trim() }
+        : {}),
+      ...(process.env.VITE_FIREBASE_MESSAGING_SENDER_ID?.trim()
+        ? { messagingSenderId: process.env.VITE_FIREBASE_MESSAGING_SENDER_ID.trim() }
+        : {}),
+      ...(process.env.VITE_FIREBASE_DATABASE_ID?.trim()
+        ? { firestoreDatabaseId: process.env.VITE_FIREBASE_DATABASE_ID.trim() }
+        : {}),
+    };
+    if (!merged.projectId) return null;
+    if (!merged.firestoreDatabaseId) {
+      merged.firestoreDatabaseId = '(default)';
+    }
+    return merged;
+  };
+
   app.get('/api/firebase-config', (_req, res) => {
     try {
-      if (!fs.existsSync(firebaseConfigPath)) {
+      const cfg = resolveFirebaseServerConfig();
+      if (!cfg) {
         res.status(404).json({ error: 'Firebase configuration file not found.' });
         return;
       }
-      const raw = fs.readFileSync(firebaseConfigPath, 'utf-8');
-      res.json(JSON.parse(raw));
+      res.json(cfg);
     } catch (err) {
       handleRouteError(res, err);
     }
@@ -387,15 +423,8 @@ async function createServer() {
         res.status(401).json({ error: 'Firebase ID token required.' });
         return;
       }
-      if (!fs.existsSync(firebaseConfigPath)) {
-        res.status(404).json({ error: 'Firebase configuration missing.' });
-        return;
-      }
-      const fbCfg = JSON.parse(fs.readFileSync(firebaseConfigPath, 'utf-8')) as {
-        projectId?: string;
-        firestoreDatabaseId?: string;
-      };
-      if (!fbCfg.projectId || !fbCfg.firestoreDatabaseId) {
+      const fbCfg = resolveFirebaseServerConfig();
+      if (!fbCfg || !fbCfg.projectId || !fbCfg.firestoreDatabaseId) {
         res.status(500).json({ error: 'Incomplete Firebase configuration.' });
         return;
       }
