@@ -34,12 +34,46 @@ export function isMatchingCloudEmail(
 
 export function isCloudSyncAuthorizedForEmail(
   cloudEmail: string | null | undefined,
-  ownerEmail: string | null | undefined
+  ownerEmail: string | null | undefined,
+  actorEmail?: string | null | undefined
 ): boolean {
   const normCloud = normalizeOwnerKey(cloudEmail || '');
   if (!normCloud) return false;
   if (normCloud === SUPER_ADMIN_EMAIL) return true;
-  return isMatchingCloudEmail(normCloud, ownerEmail);
+  if (isMatchingCloudEmail(normCloud, ownerEmail)) return true;
+  if (actorEmail && isMatchingCloudEmail(normCloud, actorEmail)) return true;
+  return false;
+}
+
+export function formatCloudSyncError(err: unknown, currentHost?: string): string {
+  let raw = err instanceof Error ? err.message : String(err || 'Cloud sync error.');
+  try {
+    if (raw.startsWith('{')) {
+      const parsed = JSON.parse(raw) as { error?: string; path?: string };
+      if (parsed.error) {
+        raw = parsed.path ? `${parsed.error} (${parsed.path})` : parsed.error;
+      }
+    }
+  } catch (_) {}
+
+  const lower = raw.toLowerCase();
+  if (lower.includes('auth/unauthorized-domain')) {
+    const host =
+      currentHost ||
+      (typeof window !== 'undefined' && window.location?.hostname) ||
+      'this domain';
+    return `Domain "${host}" is not authorized in Firebase Authentication. Add "${host}" under Firebase Console > Authentication > Settings > Authorized domains.`;
+  }
+  if (lower.includes('auth/popup-blocked')) {
+    return 'Google login popup was blocked by your browser. Allow pop-ups for this site and tap Sign In & Sync again.';
+  }
+  if (lower.includes('auth/popup-closed-by-user') || lower.includes('cancelled-popup-request')) {
+    return 'Google sign-in popup was closed before completing. Tap Sign In & Sync and select your registered Gmail.';
+  }
+  if (lower.includes('permission-denied') || lower.includes('missing or insufficient permissions')) {
+    return `Cloud permission denied: verify your Google sign-in email matches the shop owner/employee email and retry (${raw}).`;
+  }
+  return raw;
 }
 
 export function computeExponentialBackoffMs(attempt: number, baseMs: number = 1500, maxMs: number = 60_000): number {
@@ -154,6 +188,8 @@ export function mergeOfflineAndDbBills(
 
 export interface SyncStateSummary {
   totalBills: number;
+  pendingBillsCount: number;
+  pendingItemsCount: number;
   pendingCount: number;
   syncedCount: number;
   status: 'offline' | 'syncing' | 'needs_auth' | 'pending' | 'synced';
@@ -161,27 +197,65 @@ export interface SyncStateSummary {
 
 export function summarizeSyncState(params: {
   bills: ApiBillRecord[];
+  items?: ApiItemRecord[];
   isOnline: boolean;
   isSyncing: boolean;
   hasCloudAuth: boolean;
 }): SyncStateSummary {
   const totalBills = params.bills.length;
-  const pendingCount = params.bills.filter((b) => b.syncStatus !== 'synced').length;
-  const syncedCount = totalBills - pendingCount;
+  const pendingBillsCount = params.bills.filter((b) => b.syncStatus !== 'synced').length;
+  const pendingItemsCount = (params.items || []).filter((i) => i.syncStatus !== 'synced').length;
+  const pendingCount = pendingBillsCount + pendingItemsCount;
+  const syncedCount = totalBills - pendingBillsCount;
 
   if (!params.isOnline) {
-    return { totalBills, pendingCount, syncedCount, status: 'offline' };
+    return {
+      totalBills,
+      pendingBillsCount,
+      pendingItemsCount,
+      pendingCount,
+      syncedCount,
+      status: 'offline',
+    };
   }
   if (params.isSyncing) {
-    return { totalBills, pendingCount, syncedCount, status: 'syncing' };
+    return {
+      totalBills,
+      pendingBillsCount,
+      pendingItemsCount,
+      pendingCount,
+      syncedCount,
+      status: 'syncing',
+    };
   }
-  if (pendingCount > 0 && !params.hasCloudAuth) {
-    return { totalBills, pendingCount, syncedCount, status: 'needs_auth' };
+  if (!params.hasCloudAuth) {
+    return {
+      totalBills,
+      pendingBillsCount,
+      pendingItemsCount,
+      pendingCount,
+      syncedCount,
+      status: 'needs_auth',
+    };
   }
   if (pendingCount > 0) {
-    return { totalBills, pendingCount, syncedCount, status: 'pending' };
+    return {
+      totalBills,
+      pendingBillsCount,
+      pendingItemsCount,
+      pendingCount,
+      syncedCount,
+      status: 'pending',
+    };
   }
-  return { totalBills, pendingCount, syncedCount, status: 'synced' };
+  return {
+    totalBills,
+    pendingBillsCount,
+    pendingItemsCount,
+    pendingCount,
+    syncedCount,
+    status: 'synced',
+  };
 }
 
 export function shouldAutoSync(params: {
@@ -317,6 +391,10 @@ async function executeOfflineToFirestoreSync(
     };
   }
 
+  if (options.forceManual) {
+    backoffStateByEmail.delete(key);
+  }
+
   // Respect exponential backoff cooldown unless user clicked Sync Now manually
   const backoff = backoffStateByEmail.get(key);
   if (!options.forceManual && backoff && Date.now() < backoff.retryAfterMs) {
@@ -348,19 +426,6 @@ async function executeOfflineToFirestoreSync(
 
   const totalPending = pending.items.length + pending.bills.length;
   if (!options.hasCloudAuth) {
-    if (totalPending === 0) {
-      backoffStateByEmail.delete(key);
-      return {
-        status: 'synced',
-        flushedToSqlite,
-        syncedItems: 0,
-        syncedBills: 0,
-        pulledItems: 0,
-        pulledBills: 0,
-        pendingRemaining: 0,
-        lastSyncedAt: pending.shop.lastSyncedAt || loadLastSyncedAt(ownerEmail),
-      };
-    }
     return {
       status: 'needs_auth',
       flushedToSqlite,
@@ -368,7 +433,8 @@ async function executeOfflineToFirestoreSync(
       syncedBills: 0,
       pulledItems: 0,
       pulledBills: 0,
-      pendingRemaining: pending.bills.length,
+      pendingRemaining: totalPending,
+      lastSyncedAt: pending.shop.lastSyncedAt || loadLastSyncedAt(ownerEmail),
     };
   }
 
@@ -376,19 +442,19 @@ async function executeOfflineToFirestoreSync(
   const syncedBillIds: string[] = [];
   const errors: Array<{ id: string; type: 'item' | 'bill'; error: string }> = [];
 
-  if (totalPending > 0) {
-    try {
-      await runWithExponentialRetry(() => ensureOwnerWorkspaceInFirestore(pending.shop), {
-        maxAttempts: 2,
-        baseDelayMs: 300,
-      });
-    } catch (err) {
+  try {
+    await runWithExponentialRetry(() => ensureOwnerWorkspaceInFirestore(pending.shop), {
+      maxAttempts: 2,
+      baseDelayMs: 300,
+    });
+  } catch (err) {
+    const msg = formatCloudSyncError(err);
+    if (totalPending > 0) {
       const prevFails = (backoffStateByEmail.get(key)?.failures || 0) + 1;
       backoffStateByEmail.set(key, {
         failures: prevFails,
         retryAfterMs: Date.now() + computeExponentialBackoffMs(prevFails),
       });
-      const msg = err instanceof Error ? err.message : 'Failed to initialize owner cloud record.';
       return {
         status: 'partial',
         flushedToSqlite,
@@ -396,11 +462,18 @@ async function executeOfflineToFirestoreSync(
         syncedBills: 0,
         pulledItems: 0,
         pulledBills: 0,
-        pendingRemaining: pending.bills.length,
+        pendingRemaining: totalPending,
         error: msg,
       };
     }
+    errors.push({
+      id: pending.shop.shopId,
+      type: 'item',
+      error: msg,
+    });
+  }
 
+  if (totalPending > 0) {
     for (const item of pending.items) {
       try {
         const ok = await runWithExponentialRetry(
@@ -416,7 +489,7 @@ async function executeOfflineToFirestoreSync(
         errors.push({
           id: item.id,
           type: 'item',
-          error: err instanceof Error ? err.message : 'Item sync failed',
+          error: formatCloudSyncError(err),
         });
       }
     }
@@ -436,7 +509,7 @@ async function executeOfflineToFirestoreSync(
         errors.push({
           id: bill.id,
           type: 'bill',
-          error: err instanceof Error ? err.message : 'Bill sync failed',
+          error: formatCloudSyncError(err),
         });
       }
     }
@@ -449,11 +522,19 @@ async function executeOfflineToFirestoreSync(
     workspace: ApiOwnerWorkspace;
   } | null = null;
   if (totalPending > 0) {
-    marked = await markSyncedInDb(ownerEmail, {
-      itemIds: syncedItemIds,
-      billIds: syncedBillIds,
-      errors,
-    });
+    try {
+      marked = await markSyncedInDb(ownerEmail, {
+        itemIds: syncedItemIds,
+        billIds: syncedBillIds,
+        errors,
+      });
+    } catch (markErr) {
+      errors.push({
+        id: 'mark_synced',
+        type: 'bill',
+        error: formatCloudSyncError(markErr),
+      });
+    }
   }
 
   // Pull latest bills, items, and PIN/settings from Firestore into SQLite (bidirectional sync)
@@ -479,7 +560,7 @@ async function executeOfflineToFirestoreSync(
       errors.push({
         id: 'cloud_pull',
         type: 'bill',
-        error: pullErr instanceof Error ? pullErr.message : 'Cloud pull failed',
+        error: formatCloudSyncError(pullErr),
       });
     }
   }
@@ -498,7 +579,9 @@ async function executeOfflineToFirestoreSync(
     saveLastSyncedAt(ownerEmail, finalLastSyncedAt);
   }
 
-  const pendingRemaining = Math.max(0, pending.bills.length - syncedBillIds.length);
+  const pendingRemaining =
+    Math.max(0, pending.items.length - syncedItemIds.length) +
+    Math.max(0, pending.bills.length - syncedBillIds.length);
   return {
     status: pendingRemaining === 0 && errors.length === 0 ? 'synced' : 'partial',
     flushedToSqlite,

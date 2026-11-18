@@ -549,3 +549,53 @@ test('upsertShopFromVerifiedCloud syncs updated PIN hash and mergeCloudDataForOw
   }
 });
 
+test('newly registered shop on Laptop syncs to fresh Phone SQLite DB via upsertShopFromVerifiedCloud and logs in immediately', () => {
+  const laptopDb = openShopBillDatabase(':memory:');
+  const phoneDb = openShopBillDatabase(':memory:');
+  try {
+    // Register brand new shop on Laptop using shivamraj.in5@gmail.com
+    const laptopShop = laptopDb.registerShop({
+      shopId: 'SB-1009',
+      shopName: 'Shivam Super Mart',
+      ownerName: 'Shivam Raj',
+      email: 'shivamraj.in5@gmail.com',
+      phone: '9876500001',
+      address: 'Patna Main Road',
+      pin: '4321',
+    });
+    assert.equal(laptopDb.verifyShopLogin('SB-1009', '4321', 'shivamraj.in5@gmail.com').success, true);
+
+    // Phone DB initially does not have shivamraj.in5@gmail.com
+    assert.equal(phoneDb.verifyOwnerEmail('shivamraj.in5@gmail.com').registered, false);
+
+    // Phone pulls shop from Cloud Firestore
+    const syncedToPhone = phoneDb.upsertShopFromVerifiedCloud({
+      shopId: laptopShop.shopId,
+      email: laptopShop.email,
+      emailKey: laptopShop.emailKey,
+      shopName: laptopShop.shopName,
+      ownerName: laptopShop.ownerName,
+      phone: laptopShop.phone,
+      address: laptopShop.address,
+      pinHash: laptopShop.pinHash,
+      status: laptopShop.status,
+      isActive: laptopShop.isActive,
+      createdAt: laptopShop.createdAt,
+      updatedAt: laptopShop.updatedAt,
+    });
+    assert.ok(syncedToPhone);
+
+    const emailCheckOnPhone = phoneDb.verifyOwnerEmail('shivamraj.in5@gmail.com');
+    assert.equal(emailCheckOnPhone.registered, true);
+    assert.equal(emailCheckOnPhone.shopId, 'SB-1009');
+
+    const loginOnPhone = phoneDb.verifyShopLogin('SB-1009', '4321', 'shivamraj.in5@gmail.com');
+    assert.equal(loginOnPhone.success, true);
+    assert.equal(loginOnPhone.shop?.shopName, 'Shivam Super Mart');
+  } finally {
+    laptopDb.close();
+    phoneDb.close();
+  }
+});
+
+

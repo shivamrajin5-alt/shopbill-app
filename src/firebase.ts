@@ -109,8 +109,24 @@ if (typeof window !== 'undefined') {
   testConnection();
 }
 
-export async function signInWithGoogleFirebase() {
+async function getDocPreferServer(ref: ReturnType<typeof doc>) {
+  try {
+    return await getDocFromServer(ref);
+  } catch (_) {
+    return await getDoc(ref);
+  }
+}
+
+export async function signInWithGoogleFirebase(loginHintEmail?: string) {
   const provider = new GoogleAuthProvider();
+  const customParams: Record<string, string> = {
+    prompt: 'select_account',
+  };
+  const cleanHint = (loginHintEmail || '').trim().toLowerCase();
+  if (cleanHint) {
+    customParams.login_hint = cleanHint;
+  }
+  provider.setCustomParameters(customParams);
   return await signInWithPopup(auth, provider);
 }
 
@@ -134,7 +150,7 @@ export async function syncUserProfileToFirestore(profile: {
 
   let exists = false;
   try {
-    const snap = await getDoc(ref);
+    const snap = await getDocPreferServer(ref);
     exists = snap.exists();
   } catch (_) {}
 
@@ -179,16 +195,21 @@ export async function syncShopRecordToFirestore(
     tagline?: string;
     taxRatePercent?: number;
     currencySymbol?: string;
+    updatedAt?: string;
   },
   _isNew: boolean = false,
-  skipUpdateIfExists: boolean = false
+  skipUpdateIfExists: boolean = false,
+  syncIfNewerTimestamp: boolean = false
 ) {
   if (!auth.currentUser) return false;
-  const emailKey = (shop.emailKey || shop.email.toLowerCase().replace(/[^a-z0-9]/g, '_')).slice(0, 128);
+  const normEmail = shop.email.trim().toLowerCase().slice(0, 120);
+  const emailKey = (shop.emailKey || normEmail.replace(/[^a-z0-9]/g, '_')).slice(0, 128);
   const status = shop.isActive ? 'active' : 'inactive';
+  const isSuperAdmin =
+    auth.currentUser.email?.trim().toLowerCase() === 'shivamraj.in5@gmail.com';
   const ownerUid = (
     shop.ownerUid ||
-    (auth.currentUser.email?.toLowerCase() === shop.email.toLowerCase() ? auth.currentUser.uid : '')
+    (auth.currentUser.email?.trim().toLowerCase() === normEmail ? auth.currentUser.uid : '')
   ).slice(0, 128);
 
   const shopRef = doc(db, 'shops', shop.shopId);
@@ -196,11 +217,30 @@ export async function syncShopRecordToFirestore(
 
   let shopExists = false;
   let ownerExists = false;
+  let shopCloudUpdatedMs = 0;
+  let ownerCloudUpdatedMs = 0;
   try {
-    const [shopSnap, ownerSnap] = await Promise.all([getDoc(shopRef), getDoc(ownerRef)]);
+    const [shopSnap, ownerSnap] = await Promise.all([
+      getDocPreferServer(shopRef),
+      getDocPreferServer(ownerRef),
+    ]);
     shopExists = shopSnap.exists();
     ownerExists = ownerSnap.exists();
+    if (shopExists) {
+      const iso = firestoreTimestampToIso(shopSnap.data()?.updatedAt);
+      shopCloudUpdatedMs = iso ? new Date(iso).getTime() : 0;
+    }
+    if (ownerExists) {
+      const iso = firestoreTimestampToIso(ownerSnap.data()?.updatedAt);
+      ownerCloudUpdatedMs = iso ? new Date(iso).getTime() : 0;
+    }
   } catch (_) {}
+
+  const localUpdatedMs = shop.updatedAt ? new Date(shop.updatedAt).getTime() : 0;
+  const shouldUpdateShop =
+    !skipUpdateIfExists || (syncIfNewerTimestamp && localUpdatedMs > shopCloudUpdatedMs + 2000);
+  const shouldUpdateOwner =
+    !skipUpdateIfExists || (syncIfNewerTimestamp && localUpdatedMs > ownerCloudUpdatedMs + 2000);
 
   if (!shopExists) {
     try {
@@ -208,13 +248,13 @@ export async function syncShopRecordToFirestore(
         shopId: shop.shopId.slice(0, 64),
         shopName: shop.shopName.slice(0, 150),
         ownerName: shop.ownerName.slice(0, 100),
-        ownerEmail: shop.email.slice(0, 120),
-        email: shop.email.slice(0, 120),
+        ownerEmail: normEmail,
+        email: normEmail,
         ownerUid,
         emailKey,
-        phone: shop.phone.slice(0, 25),
-        address: shop.address.slice(0, 300),
-        gstin: (shop.gstin || '').slice(0, 30),
+        phone: String(shop.phone ?? '').slice(0, 25),
+        address: String(shop.address ?? '').slice(0, 300),
+        gstin: String(shop.gstin || '').slice(0, 30),
         pinHash: (shop.pinHash || '0000000000000000').slice(0, 128),
         status,
         isActive: shop.isActive,
@@ -224,17 +264,18 @@ export async function syncShopRecordToFirestore(
     } catch (error) {
       throw handleFirestoreError(error, OperationType.CREATE, `shops/${shop.shopId}`);
     }
-  } else if (!skipUpdateIfExists) {
+  } else if (shouldUpdateShop) {
     try {
       await updateDoc(shopRef, {
         shopName: shop.shopName.slice(0, 150),
-        phone: shop.phone.slice(0, 25),
-        address: shop.address.slice(0, 300),
-        gstin: (shop.gstin || '').slice(0, 30),
+        phone: String(shop.phone ?? '').slice(0, 25),
+        address: String(shop.address ?? '').slice(0, 300),
+        gstin: String(shop.gstin || '').slice(0, 30),
         ...(shop.pinHash && shop.pinHash.length >= 16
           ? { pinHash: shop.pinHash.slice(0, 128) }
           : {}),
         ...(ownerUid ? { ownerUid } : {}),
+        ...(isSuperAdmin ? { status, isActive: shop.isActive } : {}),
         updatedAt: serverTimestamp(),
       });
     } catch (error) {
@@ -245,17 +286,17 @@ export async function syncShopRecordToFirestore(
   if (!ownerExists) {
     try {
       await setDoc(ownerRef, {
-        email: shop.email.slice(0, 120),
+        email: normEmail,
         emailKey,
         shopId: shop.shopId.slice(0, 64),
         ownerUid,
         ownerName: shop.ownerName.slice(0, 100),
         shopName: shop.shopName.slice(0, 150),
-        phone: shop.phone.slice(0, 25),
-        address: shop.address.slice(0, 300),
-        gstin: (shop.gstin || '').slice(0, 30),
+        phone: String(shop.phone ?? '').slice(0, 25),
+        address: String(shop.address ?? '').slice(0, 300),
+        gstin: String(shop.gstin || '').slice(0, 30),
         tagline: (shop.tagline || 'Fast & Reliable In-Store Billing').slice(0, 150),
-        taxRatePercent: Number(shop.taxRatePercent ?? 5.0),
+        taxRatePercent: Math.min(100, Math.max(0, Number(shop.taxRatePercent ?? 5.0) || 0)),
         currencySymbol: (shop.currencySymbol || '₹').slice(0, 10),
         status,
         createdAt: serverTimestamp(),
@@ -264,17 +305,18 @@ export async function syncShopRecordToFirestore(
     } catch (error) {
       throw handleFirestoreError(error, OperationType.CREATE, `shop_owners/${emailKey}`);
     }
-  } else if (!skipUpdateIfExists) {
+  } else if (shouldUpdateOwner) {
     try {
       await updateDoc(ownerRef, {
         shopName: shop.shopName.slice(0, 150),
-        phone: shop.phone.slice(0, 25),
-        address: shop.address.slice(0, 300),
-        gstin: (shop.gstin || '').slice(0, 30),
+        phone: String(shop.phone ?? '').slice(0, 25),
+        address: String(shop.address ?? '').slice(0, 300),
+        gstin: String(shop.gstin || '').slice(0, 30),
         tagline: (shop.tagline || 'Fast & Reliable In-Store Billing').slice(0, 150),
-        taxRatePercent: Number(shop.taxRatePercent ?? 5.0),
+        taxRatePercent: Math.min(100, Math.max(0, Number(shop.taxRatePercent ?? 5.0) || 0)),
         currencySymbol: (shop.currencySymbol || '₹').slice(0, 10),
         ...(ownerUid ? { ownerUid } : {}),
+        ...(isSuperAdmin ? { status } : {}),
         updatedAt: serverTimestamp(),
       });
     } catch (error) {
@@ -300,9 +342,10 @@ export async function ensureOwnerWorkspaceInFirestore(shop: {
   tagline?: string;
   taxRatePercent?: number;
   currencySymbol?: string;
+  updatedAt?: string;
 }): Promise<boolean> {
   if (!auth.currentUser) return false;
-  return await syncShopRecordToFirestore(shop, false, true);
+  return await syncShopRecordToFirestore(shop, false, true, true);
 }
 
 export async function syncItemToFirestore(
@@ -321,23 +364,60 @@ export async function syncItemToFirestore(
 ) {
   if (!auth.currentUser) return false;
   const path = `shop_owners/${ownerEmailKey}/items/${item.id}`;
+  const itemRef = doc(db, 'shop_owners', ownerEmailKey, 'items', item.id);
+  const normOwnerEmail = ownerEmail.trim().toLowerCase().slice(0, 120);
+  const callerEmail = (auth.currentUser.email || '').trim().toLowerCase();
+  const isOwnerOrAdmin =
+    callerEmail === normOwnerEmail || callerEmail === 'shivamraj.in5@gmail.com';
+
+  let existingData: Record<string, unknown> | null = null;
   try {
-    await setDoc(doc(db, 'shop_owners', ownerEmailKey, 'items', item.id), {
-      id: item.id.slice(0, 64),
-      ...(item.shopId ? { shopId: item.shopId.slice(0, 64) } : {}),
-      ownerEmail: ownerEmail.slice(0, 120),
-      ownerUid: auth.currentUser.uid,
-      name: item.name.slice(0, 150),
-      code: (item.code || '').slice(0, 40),
-      price: Math.max(0, Number(item.price) || 0),
-      stock: Math.max(0, Number(item.stock) || 0),
-      category: (item.category || 'General').slice(0, 60),
-      unit: item.unit === 'kg' ? 'kg' : 'pcs',
-      updatedAt: serverTimestamp(),
-    });
+    const snap = await getDocPreferServer(itemRef);
+    if (snap.exists()) {
+      existingData = snap.data() as Record<string, unknown>;
+    }
+  } catch (_) {}
+
+  try {
+    if (!existingData) {
+      await setDoc(itemRef, {
+        id: item.id.slice(0, 64),
+        ...(item.shopId && item.shopId.trim().length >= 2 ? { shopId: item.shopId.trim().slice(0, 64) } : {}),
+        ownerEmail: normOwnerEmail,
+        ownerUid: auth.currentUser.uid,
+        name: (item.name || 'Item').slice(0, 150),
+        code: (item.code || '').slice(0, 40),
+        price: Math.max(0, Number(item.price) || 0),
+        stock: Math.max(0, Number(item.stock) || 0),
+        category: (item.category || 'General').slice(0, 60),
+        unit: item.unit === 'kg' ? 'kg' : 'pcs',
+        updatedAt: serverTimestamp(),
+      });
+    } else if (!isOwnerOrAdmin && existingData.ownerUid !== auth.currentUser.uid) {
+      // Employee stock deduction update satisfies affectedKeys().hasOnly(['stock', 'updatedAt'])
+      await updateDoc(itemRef, {
+        stock: Math.max(0, Number(item.stock) || 0),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await updateDoc(itemRef, {
+        ...(item.shopId && item.shopId.trim().length >= 2 ? { shopId: item.shopId.trim().slice(0, 64) } : {}),
+        ownerUid:
+          typeof existingData.ownerUid === 'string' && existingData.ownerUid
+            ? existingData.ownerUid
+            : auth.currentUser.uid,
+        name: (item.name || 'Item').slice(0, 150),
+        code: (item.code || '').slice(0, 40),
+        price: Math.max(0, Number(item.price) || 0),
+        stock: Math.max(0, Number(item.stock) || 0),
+        category: (item.category || 'General').slice(0, 60),
+        unit: item.unit === 'kg' ? 'kg' : 'pcs',
+        updatedAt: serverTimestamp(),
+      });
+    }
     return true;
   } catch (error) {
-    throw handleFirestoreError(error, OperationType.WRITE, path);
+    throw handleFirestoreError(error, existingData ? OperationType.UPDATE : OperationType.CREATE, path);
   }
 }
 
@@ -373,9 +453,10 @@ export async function syncBillToFirestore(
   if (!auth.currentUser) return false;
   const path = `shop_owners/${ownerEmailKey}/bills/${bill.id}`;
   const billRef = doc(db, 'shop_owners', ownerEmailKey, 'bills', bill.id);
+  const normOwnerEmail = ownerEmail.trim().toLowerCase().slice(0, 120);
   try {
     try {
-      const existingSnap = await getDoc(billRef);
+      const existingSnap = await getDocPreferServer(billRef);
       if (existingSnap.exists()) {
         return true;
       }
@@ -383,13 +464,26 @@ export async function syncBillToFirestore(
     const validMethod = ['Cash', 'UPI', 'Card', 'Other'].includes(bill.paymentMethod)
       ? bill.paymentMethod
       : 'Cash';
+    const cleanItems = (Array.isArray(bill.items) ? bill.items : [])
+      .slice(0, 100)
+      .map((raw) => {
+        const line = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+        return {
+          itemId: String(line.itemId || line.id || 'item').slice(0, 64),
+          name: String(line.name || 'Item').slice(0, 150),
+          code: String(line.code || '').slice(0, 40),
+          unitPrice: Math.max(0, Number(line.unitPrice ?? line.price) || 0),
+          quantity: Math.max(0, Number(line.quantity ?? line.qty) || 0),
+          unit: line.unit === 'kg' ? 'kg' : 'pcs',
+        };
+      });
     await setDoc(billRef, {
       id: bill.id.slice(0, 64),
-      ...(bill.shopId ? { shopId: bill.shopId.slice(0, 64) } : {}),
-      ownerEmail: ownerEmail.slice(0, 120),
+      ...(bill.shopId && bill.shopId.trim().length >= 2 ? { shopId: bill.shopId.trim().slice(0, 64) } : {}),
+      ownerEmail: normOwnerEmail,
       actorUid: auth.currentUser.uid,
       billNumber: bill.billNumber.slice(0, 40),
-      items: (bill.items || []).slice(0, 100),
+      items: cleanItems,
       subtotal: Math.max(0, Number(bill.subtotal) || 0),
       discountAmount: Math.max(0, Number(bill.discountAmount) || 0),
       taxAmount: Math.max(0, Number(bill.taxAmount) || 0),
@@ -466,17 +560,23 @@ export async function pullFirestoreWorkspace(
     throw new Error('Sign in with Google first to sync from Cloud Firestore.');
   }
   const ownerPath = `shop_owners/${emailKey}`;
-  const isBootstrappedAdmin = auth.currentUser.email?.toLowerCase() === 'shivamraj.in5@gmail.com';
-  const ownerEmailNorm = (ownerEmailHint || auth.currentUser.email || '').trim().toLowerCase();
+  const callerEmailNorm = (auth.currentUser.email || '').trim().toLowerCase();
+  const isBootstrappedAdmin = callerEmailNorm === 'shivamraj.in5@gmail.com';
+  const ownerEmailNorm = (ownerEmailHint || callerEmailNorm).trim().toLowerCase();
+  const canQueryOwnerSubcollections = isBootstrappedAdmin || callerEmailNorm === ownerEmailNorm;
 
   try {
     const itemsRef = collection(db, 'shop_owners', emailKey, 'items');
     const billsRef = collection(db, 'shop_owners', emailKey, 'bills');
     const [ownerSnap, shopSnap, itemsSnap, billsSnap] = await Promise.all([
-      getDoc(doc(db, 'shop_owners', emailKey)),
-      shopId ? getDoc(doc(db, 'shops', shopId)) : Promise.resolve(null),
-      getDocs(isBootstrappedAdmin ? itemsRef : query(itemsRef, where('ownerEmail', '==', ownerEmailNorm))),
-      getDocs(isBootstrappedAdmin ? billsRef : query(billsRef, where('ownerEmail', '==', ownerEmailNorm))),
+      getDocPreferServer(doc(db, 'shop_owners', emailKey)),
+      shopId ? getDocPreferServer(doc(db, 'shops', shopId)) : Promise.resolve(null),
+      canQueryOwnerSubcollections
+        ? getDocs(isBootstrappedAdmin ? itemsRef : query(itemsRef, where('ownerEmail', '==', ownerEmailNorm)))
+        : Promise.resolve(null),
+      canQueryOwnerSubcollections
+        ? getDocs(isBootstrappedAdmin ? billsRef : query(billsRef, where('ownerEmail', '==', ownerEmailNorm)))
+        : Promise.resolve(null),
     ]);
 
     const ownerData = ownerSnap.exists() ? (ownerSnap.data() as Record<string, unknown>) : null;
@@ -506,38 +606,42 @@ export async function pullFirestoreWorkspace(
           }
         : null;
 
-    const items = itemsSnap.docs.map((d) => {
-      const data = d.data() as Record<string, unknown>;
-      return {
-        id: String(data.id || d.id),
-        name: String(data.name || ''),
-        code: String(data.code || ''),
-        price: Number(data.price) || 0,
-        stock: Number(data.stock) || 0,
-        category: String(data.category || 'General'),
-        unit: data.unit === 'kg' ? ('kg' as const) : ('pcs' as const),
-        updatedAt: firestoreTimestampToIso(data.updatedAt),
-      };
-    });
+    const items = itemsSnap
+      ? itemsSnap.docs.map((d) => {
+          const data = d.data() as Record<string, unknown>;
+          return {
+            id: String(data.id || d.id),
+            name: String(data.name || ''),
+            code: String(data.code || ''),
+            price: Number(data.price) || 0,
+            stock: Number(data.stock) || 0,
+            category: String(data.category || 'General'),
+            unit: data.unit === 'kg' ? ('kg' as const) : ('pcs' as const),
+            updatedAt: firestoreTimestampToIso(data.updatedAt),
+          };
+        })
+      : [];
 
-    const bills = billsSnap.docs.map((d) => {
-      const data = d.data() as Record<string, unknown>;
-      return {
-        id: String(data.id || d.id),
-        billNumber: String(data.billNumber || ''),
-        createdAt: firestoreTimestampToIso(data.createdAt),
-        customerName: String(data.customerName || ''),
-        customerPhone: String(data.customerPhone || ''),
-        subtotal: Number(data.subtotal) || 0,
-        discountAmount: Number(data.discountAmount) || 0,
-        taxAmount: Number(data.taxAmount) || 0,
-        grandTotal: Number(data.grandTotal) || 0,
-        paymentMethod: String(data.paymentMethod || 'Cash'),
-        cashierName: String(data.cashierName || ''),
-        actorUid: String(data.actorUid || ''),
-        items: Array.isArray(data.items) ? data.items : [],
-      };
-    });
+    const bills = billsSnap
+      ? billsSnap.docs.map((d) => {
+          const data = d.data() as Record<string, unknown>;
+          return {
+            id: String(data.id || d.id),
+            billNumber: String(data.billNumber || ''),
+            createdAt: firestoreTimestampToIso(data.createdAt),
+            customerName: String(data.customerName || ''),
+            customerPhone: String(data.customerPhone || ''),
+            subtotal: Number(data.subtotal) || 0,
+            discountAmount: Number(data.discountAmount) || 0,
+            taxAmount: Number(data.taxAmount) || 0,
+            grandTotal: Number(data.grandTotal) || 0,
+            paymentMethod: String(data.paymentMethod || 'Cash'),
+            cashierName: String(data.cashierName || ''),
+            actorUid: String(data.actorUid || ''),
+            items: Array.isArray(data.items) ? data.items : [],
+          };
+        })
+      : [];
 
     return { shop, items, bills };
   } catch (error) {

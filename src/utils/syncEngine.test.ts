@@ -5,6 +5,7 @@ import {
   computeExponentialBackoffMs,
   dequeueOfflineBill,
   enqueueOfflineBill,
+  formatCloudSyncError,
   getOfflineBillsForOwner,
   isCloudSyncAuthorizedForEmail,
   isMatchingCloudEmail,
@@ -100,32 +101,52 @@ test('mergeOfflineAndDbBills deduplicates by id and billNumber and sorts newest 
   assert.equal(merged[1].syncStatus, 'synced');
 });
 
-test('summarizeSyncState accurately reports offline, needs_auth, pending, syncing, and synced', () => {
+test('summarizeSyncState accurately reports offline, needs_auth, pending items/bills, syncing, and synced', () => {
   const pendingBills = [
     makeBill({ id: 'b1', syncStatus: 'pending' }),
     makeBill({ id: 'b2', syncStatus: 'synced' }),
   ];
+  const items = [
+    makeItem({ id: 'i1', syncStatus: 'pending' }),
+    makeItem({ id: 'i2', syncStatus: 'synced' }),
+  ];
 
   const offlineSummary = summarizeSyncState({
     bills: pendingBills,
+    items,
     isOnline: false,
     isSyncing: false,
     hasCloudAuth: false,
   });
   assert.equal(offlineSummary.status, 'offline');
-  assert.equal(offlineSummary.pendingCount, 1);
+  assert.equal(offlineSummary.pendingBillsCount, 1);
+  assert.equal(offlineSummary.pendingItemsCount, 1);
+  assert.equal(offlineSummary.pendingCount, 2);
   assert.equal(offlineSummary.syncedCount, 1);
 
-  const needsAuthSummary = summarizeSyncState({
-    bills: pendingBills,
+  const needsAuthEvenWhenBillsSynced = summarizeSyncState({
+    bills: [makeBill({ id: 'b2', syncStatus: 'synced' })],
+    items: [makeItem({ id: 'i2', syncStatus: 'synced' })],
     isOnline: true,
     isSyncing: false,
     hasCloudAuth: false,
   });
-  assert.equal(needsAuthSummary.status, 'needs_auth');
+  assert.equal(needsAuthEvenWhenBillsSynced.status, 'needs_auth');
+
+  const pendingItemsSummary = summarizeSyncState({
+    bills: [makeBill({ id: 'b2', syncStatus: 'synced' })],
+    items,
+    isOnline: true,
+    isSyncing: false,
+    hasCloudAuth: true,
+  });
+  assert.equal(pendingItemsSummary.status, 'pending');
+  assert.equal(pendingItemsSummary.pendingItemsCount, 1);
+  assert.equal(pendingItemsSummary.pendingCount, 1);
 
   const syncedSummary = summarizeSyncState({
     bills: [makeBill({ id: 'b2', syncStatus: 'synced' })],
+    items: [makeItem({ id: 'i2', syncStatus: 'synced' })],
     isOnline: true,
     isSyncing: false,
     hasCloudAuth: true,
@@ -194,11 +215,46 @@ test('isMatchingCloudEmail permits cloud sync only when verified Google email ma
   assert.equal(isMatchingCloudEmail('rajesh@quickmart.in', ''), false);
 });
 
-test('isCloudSyncAuthorizedForEmail permits exact owner match and bootstrapped super_admin email for Demo Store sync', () => {
+test('isCloudSyncAuthorizedForEmail permits owner, matching employee actorEmail, and super_admin email', () => {
   assert.equal(isCloudSyncAuthorizedForEmail(SUPER_ADMIN_EMAIL, 'rajesh@quickmart.in'), true);
   assert.equal(isCloudSyncAuthorizedForEmail('other@gmail.com', 'rajesh@quickmart.in'), false);
   assert.equal(isCloudSyncAuthorizedForEmail('rajesh@quickmart.in', 'rajesh@quickmart.in'), true);
+  assert.equal(
+    isCloudSyncAuthorizedForEmail('staff@gmail.com', 'rajesh@quickmart.in', 'Staff@Gmail.com'),
+    true
+  );
+  assert.equal(
+    isCloudSyncAuthorizedForEmail('wrong@gmail.com', 'rajesh@quickmart.in', 'staff@gmail.com'),
+    false
+  );
   assert.equal(isCloudSyncAuthorizedForEmail(null, 'rajesh@quickmart.in'), false);
+});
+
+test('formatCloudSyncError produces clear messages for unauthorized domains, popups, and Firestore rules errors', () => {
+  const domainErr = formatCloudSyncError(
+    new Error('Firebase: Error (auth/unauthorized-domain).'),
+    'billkart-app.onrender.com'
+  );
+  assert.match(domainErr, /billkart-app\.onrender\.com/);
+  assert.match(domainErr, /Authorized domains/);
+
+  const popupBlocked = formatCloudSyncError(new Error('Firebase: Error (auth/popup-blocked).'));
+  assert.match(popupBlocked, /popup was blocked/i);
+
+  const popupClosed = formatCloudSyncError(new Error('Firebase: Error (auth/popup-closed-by-user).'));
+  assert.match(popupClosed, /closed before completing/i);
+
+  const firestoreJsonErr = formatCloudSyncError(
+    new Error(
+      JSON.stringify({
+        error: 'Missing or insufficient permissions.',
+        path: 'shop_owners/rajesh_quickmart_in/bills/b1',
+        operationType: 'create',
+      })
+    )
+  );
+  assert.match(firestoreJsonErr, /permission denied/i);
+  assert.match(firestoreJsonErr, /shop_owners\/rajesh_quickmart_in\/bills\/b1/);
 });
 
 test('computeExponentialBackoffMs grows exponentially and caps at maxMs', () => {

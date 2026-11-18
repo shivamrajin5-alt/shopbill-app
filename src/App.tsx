@@ -59,6 +59,7 @@ import {
   signInWithGoogleFirebase,
   signOutFirebase,
   syncShopRecordToFirestore,
+  ensureOwnerWorkspaceInFirestore,
   syncUserProfileToFirestore,
   exportFirestoreShopData,
   deleteItemFromFirestore,
@@ -100,6 +101,7 @@ import {
 } from './services/shopApi';
 import {
   bufferOfflineBillInBrowser,
+  formatCloudSyncError,
   getBrowserBufferedCount,
   getOfflineBillsForOwner,
   isCloudSyncAuthorizedForEmail,
@@ -138,6 +140,10 @@ export interface ShopItem {
   stock: number;
   category: string;
   unit: ItemUnit;
+  updatedAt?: string;
+  syncStatus?: 'pending' | 'synced';
+  syncedAt?: string | null;
+  syncError?: string | null;
 }
 
 export interface BillItemEntry {
@@ -373,14 +379,19 @@ export default function App() {
   );
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [autoSyncNotice, setAutoSyncNotice] = useState<string | null>(null);
+  const [lastSyncError, setLastSyncError] = useState<string | null>(null);
   const activeOwnerEmailRef = useRef(activeOwnerEmail);
   activeOwnerEmailRef.current = activeOwnerEmail;
+  const activeUserEmailRef = useRef(activeUserEmail);
+  activeUserEmailRef.current = activeUserEmail;
   const currentUserRef = useRef(currentUser);
   currentUserRef.current = currentUser;
   const isSyncingRef = useRef(isSyncing);
   isSyncingRef.current = isSyncing;
   const billsRef = useRef(bills);
   billsRef.current = bills;
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
   const isAdminAuthRef = useRef(isAdminAuthenticated);
   isAdminAuthRef.current = isAdminAuthenticated;
 
@@ -447,6 +458,8 @@ export default function App() {
     setActiveOwnerEmailKey('');
     setActiveUserEmail('');
     setLastSyncedAt(null);
+    setAutoSyncNotice(null);
+    setLastSyncError(null);
     setEmployees([]);
     setShopAuditLogs([]);
     setBackupHistory([]);
@@ -464,8 +477,13 @@ export default function App() {
   ) => {
     const onlineFlag = onlineOverride ?? (typeof navigator !== 'undefined' ? navigator.onLine : isOnline);
     const matchingGoogleAuth = Boolean(
-      auth.currentUser?.emailVerified &&
-        isCloudSyncAuthorizedForEmail(auth.currentUser?.email, targetEmail)
+      auth.currentUser &&
+        auth.currentUser.emailVerified !== false &&
+        isCloudSyncAuthorizedForEmail(
+          auth.currentUser.email,
+          targetEmail,
+          activeUserEmailRef.current
+        )
     );
     const hasAuthFlag = authOverride !== undefined ? authOverride && matchingGoogleAuth : matchingGoogleAuth;
     if (!targetEmail || !onlineFlag || !currentUserRef.current) return;
@@ -505,6 +523,21 @@ export default function App() {
         const merged = mergeOfflineAndDbBills(browserOffline, ws.bills);
         setBills(merged);
       }
+
+      if (res.status === 'synced') {
+        setLastSyncError(null);
+      } else if (res.status === 'needs_auth') {
+        if (forceManual) {
+          const expectedEmail = activeUserEmailRef.current || targetEmail;
+          const msg = `Cloud sync needs Google sign-in with ${expectedEmail}.`;
+          setLastSyncError(msg);
+          setAutoSyncNotice(msg);
+          setTimeout(() => setAutoSyncNotice(null), 5000);
+        }
+      } else if (res.error) {
+        setLastSyncError(res.error);
+      }
+
       const pulledTotal = (res.pulledBills || 0) + (res.pulledItems || 0);
       if (res.syncedBills > 0 || res.syncedItems > 0 || pulledTotal > 0) {
         const parts: string[] = [];
@@ -523,15 +556,80 @@ export default function App() {
         if (isAdminAuthRef.current) refreshShopsFromDb();
       } else if (res.error && forceManual) {
         setAutoSyncNotice(`Sync notice: ${res.error}`);
-        setTimeout(() => setAutoSyncNotice(null), 5000);
-      } else if (forceManual && hasAuthFlag) {
+        setTimeout(() => setAutoSyncNotice(null), 6000);
+      } else if (forceManual && hasAuthFlag && res.status === 'synced') {
         setAutoSyncNotice('All bills, items & PIN are up to date with Cloud');
         setTimeout(() => setAutoSyncNotice(null), 3500);
       }
-    } catch (_) {
-      // Bills stay safely queued in SQLite / local offline store until next online attempt
+    } catch (err) {
+      const host = typeof window !== 'undefined' ? window.location.hostname : undefined;
+      const msg = formatCloudSyncError(err, host);
+      setLastSyncError(msg);
+      if (forceManual) {
+        setAutoSyncNotice(msg);
+        setTimeout(() => setAutoSyncNotice(null), 6000);
+      }
     } finally {
       setIsSyncing(false);
+    }
+  };
+
+  const handleGoogleConnectAndSync = async (forceSwitchAccount: boolean = false) => {
+    if (!activeOwnerEmail) return;
+    setLastSyncError(null);
+    if (!isOnline) {
+      setAutoSyncNotice('You are offline. Records stay saved in SQLite until online.');
+      setTimeout(() => setAutoSyncNotice(null), 4000);
+      return;
+    }
+    if (hasMatchingCloudAuth && !forceSwitchAccount) {
+      await triggerCloudSync(activeOwnerEmail, isOnline, true, true);
+      return;
+    }
+
+    const targetHint = activeUserEmail || activeOwnerEmail;
+    try {
+      const res = await signInWithGoogleFirebase(targetHint);
+      const googleEmail = (res.user?.email || '').trim().toLowerCase();
+      if (!isCloudSyncAuthorizedForEmail(googleEmail, activeOwnerEmail, activeUserEmail)) {
+        await signOutFirebase();
+        const isEmployeeLogin =
+          Boolean(activeUserEmail) &&
+          activeUserEmail.toLowerCase() !== activeOwnerEmail.toLowerCase();
+        const msg = `Wrong Gmail (${googleEmail}). Tap Sign In & Sync and pick ${targetHint}${
+          isEmployeeLogin ? '' : ` (or add ${googleEmail} in Employees)`
+        }.`;
+        setLastSyncError(msg);
+        setAutoSyncNotice(msg);
+        setTimeout(() => setAutoSyncNotice(null), 7000);
+        return;
+      }
+
+      if (res.user) {
+        await syncUserProfileToFirestore({
+          uid: res.user.uid,
+          email: googleEmail,
+          emailKey: activeOwnerEmailKey,
+          displayName: currentUser?.name || shopProfile.name,
+          role:
+            googleEmail === SUPER_ADMIN_EMAIL &&
+            !isMatchingCloudEmail(googleEmail, activeOwnerEmail)
+              ? 'admin'
+              : currentUser?.role === 'employee'
+                ? 'employee'
+                : 'owner',
+          shopId: shopProfile.shopId,
+          isActive: true,
+        }).catch(() => {});
+      }
+
+      await triggerCloudSync(activeOwnerEmail, isOnline, true, true);
+    } catch (err) {
+      const host = typeof window !== 'undefined' ? window.location.hostname : undefined;
+      const msg = formatCloudSyncError(err, host);
+      setLastSyncError(msg);
+      setAutoSyncNotice(msg);
+      setTimeout(() => setAutoSyncNotice(null), 7000);
     }
   };
 
@@ -540,11 +638,13 @@ export default function App() {
       setCloudUserEmail(u?.email ?? null);
       const email = activeOwnerEmailRef.current;
       if (
-        u?.emailVerified &&
+        u &&
+        u.emailVerified !== false &&
         currentUserRef.current &&
-        isCloudSyncAuthorizedForEmail(u.email, email) &&
+        isCloudSyncAuthorizedForEmail(u.email, email, activeUserEmailRef.current) &&
         (typeof navigator === 'undefined' || navigator.onLine)
       ) {
+        setLastSyncError(null);
         triggerCloudSync(email, true, true);
       }
     });
@@ -555,8 +655,13 @@ export default function App() {
       const email = activeOwnerEmailRef.current;
       if (currentUserRef.current && email) {
         const hasMatch = Boolean(
-          auth.currentUser?.emailVerified &&
-            isCloudSyncAuthorizedForEmail(auth.currentUser?.email, email)
+          auth.currentUser &&
+            auth.currentUser.emailVerified !== false &&
+            isCloudSyncAuthorizedForEmail(
+              auth.currentUser.email,
+              email,
+              activeUserEmailRef.current
+            )
         );
         triggerCloudSync(email, true, hasMatch);
       }
@@ -571,8 +676,13 @@ export default function App() {
         const email = activeOwnerEmailRef.current;
         if (currentUserRef.current && email) {
           const hasMatch = Boolean(
-            auth.currentUser?.emailVerified &&
-              isCloudSyncAuthorizedForEmail(auth.currentUser?.email, email)
+            auth.currentUser &&
+              auth.currentUser.emailVerified !== false &&
+              isCloudSyncAuthorizedForEmail(
+                auth.currentUser.email,
+                email,
+                activeUserEmailRef.current
+              )
           );
           triggerCloudSync(email, true, hasMatch);
         }
@@ -592,17 +702,23 @@ export default function App() {
       }
       if (!currentUserRef.current || !email) return;
       const bufferedCount = getBrowserBufferedCount(email);
-      const pendingInList = billsRef.current.filter((b) => b.syncStatus !== 'synced').length;
+      const pendingBillsInList = billsRef.current.filter((b) => b.syncStatus !== 'synced').length;
+      const pendingItemsInList = itemsRef.current.filter((i) => i.syncStatus !== 'synced').length;
       const hasMatch = Boolean(
-        auth.currentUser?.emailVerified &&
-          isCloudSyncAuthorizedForEmail(auth.currentUser?.email, email)
+        auth.currentUser &&
+          auth.currentUser.emailVerified !== false &&
+          isCloudSyncAuthorizedForEmail(
+            auth.currentUser.email,
+            email,
+            activeUserEmailRef.current
+          )
       );
       if (
         shouldAutoSync({
           isOnline: navOnline,
           isSyncing: isSyncingRef.current,
           hasCloudAuth: hasMatch,
-          pendingCount: pendingInList,
+          pendingCount: pendingBillsInList + pendingItemsInList,
           browserBufferedCount: bufferedCount,
         })
       ) {
@@ -621,19 +737,25 @@ export default function App() {
   }, []);
 
   const hasMatchingCloudAuth = useMemo(
-    () => Boolean(cloudUserEmail && isCloudSyncAuthorizedForEmail(cloudUserEmail, activeOwnerEmail)),
-    [cloudUserEmail, activeOwnerEmail]
+    () =>
+      Boolean(
+        cloudUserEmail &&
+          auth.currentUser?.emailVerified !== false &&
+          isCloudSyncAuthorizedForEmail(cloudUserEmail, activeOwnerEmail, activeUserEmail)
+      ),
+    [cloudUserEmail, activeOwnerEmail, activeUserEmail]
   );
 
   const syncSummary = useMemo(
     () =>
       summarizeSyncState({
         bills,
+        items,
         isOnline,
         isSyncing,
         hasCloudAuth: hasMatchingCloudAuth,
       }),
-    [bills, isOnline, isSyncing, hasMatchingCloudAuth]
+    [bills, items, isOnline, isSyncing, hasMatchingCloudAuth]
   );
 
   // UI Presentation Mode & Responsive PWA Standalone Edge-to-Edge Shell
@@ -898,7 +1020,9 @@ class Item {
                 {currentScreen === 'login' && (
                   <LoginScreenView
                     cloudUserEmail={cloudUserEmail}
-                    onLoginSuccess={(user, shop, workspace, loggedUser) => {
+                    onLoginSuccess={async (user, shop, workspace, loggedUser) => {
+                      setLastSyncError(null);
+                      setAutoSyncNotice(null);
                       if (workspace) {
                         applyWorkspace(
                           workspace.shop,
@@ -907,12 +1031,14 @@ class Item {
                           loggedUser,
                           workspace.employees || []
                         );
+                        const actorEmail = loggedUser?.email || workspace.shop.email;
                         if (
                           loggedUser &&
-                          auth.currentUser?.emailVerified &&
-                          isMatchingCloudEmail(auth.currentUser?.email, loggedUser.email)
+                          auth.currentUser &&
+                          auth.currentUser.emailVerified !== false &&
+                          isMatchingCloudEmail(auth.currentUser.email, loggedUser.email)
                         ) {
-                          syncUserProfileToFirestore({
+                          await syncUserProfileToFirestore({
                             uid: auth.currentUser.uid,
                             email: loggedUser.email,
                             emailKey: workspace.shop.emailKey,
@@ -923,12 +1049,19 @@ class Item {
                           }).catch(() => {});
                         }
                         const hasMatch = Boolean(
-                          auth.currentUser?.emailVerified &&
-                            isCloudSyncAuthorizedForEmail(auth.currentUser?.email, workspace.shop.email)
+                          auth.currentUser &&
+                            auth.currentUser.emailVerified !== false &&
+                            isCloudSyncAuthorizedForEmail(
+                              auth.currentUser.email,
+                              workspace.shop.email,
+                              actorEmail
+                            )
                         );
+                        navigateTo('home');
                         if (isOnline && hasMatch) {
                           triggerCloudSync(workspace.shop.email, isOnline, true);
                         }
+                        return;
                       } else {
                         setCurrentUser(user);
                         if (shop) {
@@ -974,9 +1107,38 @@ class Item {
                     onConnectGoogle={async () => {
                       if (cloudUserEmail) {
                         await signOutFirebase();
-                      } else {
-                        await signInWithGoogleFirebase();
+                        return { connected: false, synced: 0, error: undefined };
                       }
+                      await signInWithGoogleFirebase(SUPER_ADMIN_EMAIL);
+                      const freshShops = await fetchAllShops().catch(() => shopOwners);
+                      if (freshShops.length > 0) setShopOwners(freshShops);
+                      let synced = 0;
+                      let firstError: string | undefined;
+                      for (const shop of freshShops) {
+                        try {
+                          const ok = await ensureOwnerWorkspaceInFirestore(shop);
+                          if (ok) synced += 1;
+                        } catch (err) {
+                          if (!firstError) firstError = formatCloudSyncError(err);
+                        }
+                      }
+                      return { connected: true, synced, error: firstError };
+                    }}
+                    onSyncAllToCloud={async () => {
+                      const freshShops = await fetchAllShops().catch(() => shopOwners);
+                      if (freshShops.length > 0) setShopOwners(freshShops);
+                      let synced = 0;
+                      let failed = 0;
+                      for (const shop of freshShops) {
+                        try {
+                          const ok = await ensureOwnerWorkspaceInFirestore(shop);
+                          if (ok) synced += 1;
+                          else failed += 1;
+                        } catch (_) {
+                          failed += 1;
+                        }
+                      }
+                      return { synced, failed };
                     }}
                     onRefresh={refreshShopsFromDb}
                     onOpenAuditLogs={async () => {
@@ -996,7 +1158,15 @@ class Item {
                       gstin?: string;
                     }) => {
                       const saved = await registerShopInDb(input);
-                      syncShopRecordToFirestore(saved, true).catch(() => {});
+                      let cloudSynced = false;
+                      let syncError = '';
+                      if (auth.currentUser) {
+                        try {
+                          cloudSynced = Boolean(await syncShopRecordToFirestore(saved, true));
+                        } catch (err) {
+                          syncError = err instanceof Error ? err.message : 'Cloud sync failed';
+                        }
+                      }
                       setShopOwners((prev) => [saved, ...prev.filter((o) => o.shopId !== saved.shopId)]);
                       setUsers((prev) => [
                         ...prev,
@@ -1007,7 +1177,7 @@ class Item {
                           pin: '',
                         },
                       ]);
-                      return saved;
+                      return { shop: saved, cloudSynced, syncError };
                     }}
                     onUpdateOwner={(updated: any) => {
                       setShopOwners(updateShopOwner(shopOwners, updated));
@@ -1067,6 +1237,8 @@ class Item {
                     shopProfile={shopProfile}
                     currentUser={currentUser}
                     activeUserEmail={activeUserEmail}
+                    activeOwnerEmail={activeOwnerEmail}
+                    cloudUserEmail={cloudUserEmail}
                     employeesCount={employees.length}
                     bills={bills}
                     items={items}
@@ -1074,25 +1246,11 @@ class Item {
                     isSyncing={isSyncing}
                     lastSyncedAt={lastSyncedAt}
                     autoSyncNotice={autoSyncNotice}
+                    lastSyncError={lastSyncError}
                     pendingSyncCount={syncSummary.pendingCount}
                     hasCloudAuth={hasMatchingCloudAuth}
-                    onSyncNow={async () => {
-                      if (!hasMatchingCloudAuth && currentUser?.role !== 'employee') {
-                        try {
-                          const res = await signInWithGoogleFirebase();
-                          const googleEmail = res.user?.email || '';
-                          if (!isCloudSyncAuthorizedForEmail(googleEmail, activeOwnerEmail)) {
-                            await signOutFirebase();
-                            setAutoSyncNotice(`Sign in with ${activeOwnerEmail} to sync private data`);
-                            setTimeout(() => setAutoSyncNotice(null), 5000);
-                            return;
-                          }
-                          triggerCloudSync(activeOwnerEmail, isOnline, true, true);
-                        } catch (_) {}
-                      } else {
-                        triggerCloudSync(activeOwnerEmail, isOnline, hasMatchingCloudAuth, true);
-                      }
-                    }}
+                    onSyncNow={() => handleGoogleConnectAndSync(false)}
+                    onSwitchGoogleAccount={() => handleGoogleConnectAndSync(true)}
                     onOpenEmployees={async () => {
                       if (currentUser?.role !== 'owner' || !activeOwnerEmail) return;
                       try {
@@ -1131,6 +1289,12 @@ class Item {
                   <ItemsScreenView
                     items={items}
                     canManage={currentUser?.role !== 'employee'}
+                    isOnline={isOnline}
+                    isSyncing={isSyncing}
+                    hasCloudAuth={hasMatchingCloudAuth}
+                    pendingItemsCount={syncSummary.pendingItemsCount}
+                    lastSyncError={lastSyncError}
+                    onSyncNow={() => handleGoogleConnectAndSync(false)}
                     fmt={fmt}
                     onBack={() => navigateTo('home')}
                     onAddItem={() => {
@@ -1152,31 +1316,44 @@ class Item {
                     currencySymbol={shopProfile.currencySymbol}
                     onBack={() => navigateTo('items')}
                     onSave={async (savedItem) => {
+                      const localPendingItem: ShopItem = {
+                        ...savedItem,
+                        updatedAt: new Date().toISOString(),
+                        syncStatus: 'pending',
+                      };
                       if (editingItem) {
-                        setItems(items.map((i) => (i.id === savedItem.id ? savedItem : i)));
+                        setItems((prev) => prev.map((i) => (i.id === localPendingItem.id ? localPendingItem : i)));
                       } else {
-                        setItems([savedItem, ...items]);
-                      }
-                      if (activeOwnerEmail) {
-                        saveOwnerItemInDb(activeOwnerEmail, savedItem)
-                          .then(() => {
-                            if (isOnline && auth.currentUser) {
-                              triggerCloudSync(activeOwnerEmail, true, true);
-                            }
-                          })
-                          .catch(() => {});
+                        setItems((prev) => [localPendingItem, ...prev]);
                       }
                       navigateTo('items');
-                    }}
-                    onDelete={(id) => {
-                      setItems(items.filter((i) => i.id !== id));
                       if (activeOwnerEmail) {
-                        deleteOwnerItemInDb(activeOwnerEmail, id).catch(() => {});
-                        if (isOnline && auth.currentUser) {
-                          deleteItemFromFirestore(activeOwnerEmailKey, id).catch(() => {});
+                        try {
+                          const savedInDb = await saveOwnerItemInDb(activeOwnerEmail, localPendingItem);
+                          setItems((prev) =>
+                            prev.map((i) => (i.id === savedInDb.id ? savedInDb : i))
+                          );
+                          if (isOnline) {
+                            triggerCloudSync(activeOwnerEmail, true);
+                          }
+                        } catch (err) {
+                          setLastSyncError(formatCloudSyncError(err));
                         }
                       }
+                    }}
+                    onDelete={async (id) => {
+                      setItems((prev) => prev.filter((i) => i.id !== id));
                       navigateTo('items');
+                      if (activeOwnerEmail) {
+                        try {
+                          await deleteOwnerItemInDb(activeOwnerEmail, id);
+                          if (isOnline && hasMatchingCloudAuth && activeOwnerEmailKey) {
+                            await deleteItemFromFirestore(activeOwnerEmailKey, id);
+                          }
+                        } catch (err) {
+                          setLastSyncError(formatCloudSyncError(err));
+                        }
+                      }
                     }}
                   />
                 )}
@@ -1192,12 +1369,17 @@ class Item {
                       const localPendingBill: BillRecord = { ...newBill, syncStatus: 'pending' };
                       setBills((prev) => [localPendingBill, ...prev]);
                       setActiveBill(localPendingBill);
-                      // Deduct stock immediately in UI
+                      // Deduct stock immediately in UI and mark deducted items as pending sync
                       setItems((prev) =>
                         prev.map((it) => {
                           const billed = newBill.items.find((bi) => bi.itemId === it.id);
                           return billed
-                            ? { ...it, stock: Math.max(0, it.stock - billed.quantity) }
+                            ? {
+                                ...it,
+                                stock: Math.max(0, it.stock - billed.quantity),
+                                updatedAt: new Date().toISOString(),
+                                syncStatus: 'pending',
+                              }
                             : it;
                         })
                       );
@@ -1214,9 +1396,9 @@ class Item {
                             prev && prev.id === savedInSqlite.id ? savedInSqlite : prev
                           );
                           refreshShopsFromDb();
-                          // When internet is available and Google Firebase auth is connected, auto-sync to Firestore
-                          if (isOnline && auth.currentUser) {
-                            triggerCloudSync(activeOwnerEmail, true, true);
+                          // Trigger Cloud sync if online & authorized; surfaces error if auth missing/denied
+                          if (isOnline) {
+                            triggerCloudSync(activeOwnerEmail, true);
                           }
                         } catch (_) {
                           // If browser is completely offline from local server, buffer in localStorage queue until online
@@ -1252,23 +1434,9 @@ class Item {
                     isSyncing={isSyncing}
                     pendingSyncCount={syncSummary.pendingCount}
                     hasCloudAuth={hasMatchingCloudAuth}
-                    onSyncNow={async () => {
-                      if (!hasMatchingCloudAuth && currentUser?.role !== 'employee') {
-                        try {
-                          const res = await signInWithGoogleFirebase();
-                          const googleEmail = res.user?.email || '';
-                          if (!isCloudSyncAuthorizedForEmail(googleEmail, activeOwnerEmail)) {
-                            await signOutFirebase();
-                            setAutoSyncNotice(`Sign in with ${activeOwnerEmail} to sync private data`);
-                            setTimeout(() => setAutoSyncNotice(null), 5000);
-                            return;
-                          }
-                          triggerCloudSync(activeOwnerEmail, isOnline, true, true);
-                        } catch (_) {}
-                      } else {
-                        triggerCloudSync(activeOwnerEmail, isOnline, hasMatchingCloudAuth, true);
-                      }
-                    }}
+                    lastSyncError={lastSyncError}
+                    onSyncNow={() => handleGoogleConnectAndSync(false)}
+                    onSwitchGoogleAccount={() => handleGoogleConnectAndSync(true)}
                     fmt={fmt}
                     fmtDate={fmtDate}
                     onBack={() => navigateTo('home')}
@@ -1435,19 +1603,40 @@ class Item {
                         saveOwnerSettingsInDb(activeOwnerEmail, next)
                           .then((savedShop) => {
                             if (
-                              auth.currentUser?.emailVerified &&
-                              isCloudSyncAuthorizedForEmail(auth.currentUser?.email, activeOwnerEmail)
+                              auth.currentUser &&
+                              auth.currentUser.emailVerified !== false &&
+                              isCloudSyncAuthorizedForEmail(
+                                auth.currentUser.email,
+                                activeOwnerEmail,
+                                activeUserEmail
+                              )
                             ) {
-                              syncShopRecordToFirestore(savedShop, false).catch(() => {});
+                              syncShopRecordToFirestore(savedShop, false).catch((err) => {
+                                setLastSyncError(formatCloudSyncError(err));
+                              });
                             }
                             if (isAdminAuthRef.current) refreshShopsFromDb();
                           })
-                          .catch(() => {});
+                          .catch((err) => {
+                            setLastSyncError(formatCloudSyncError(err));
+                          });
                       }
                     }}
                     onResetPin={async (currentPin, newPin) => {
                       const saved = await resetOwnShopPinInDb(activeOwnerEmail, currentPin, newPin);
-                      syncShopRecordToFirestore(saved, false).catch(() => {});
+                      if (
+                        auth.currentUser &&
+                        auth.currentUser.emailVerified !== false &&
+                        isCloudSyncAuthorizedForEmail(
+                          auth.currentUser.email,
+                          activeOwnerEmail,
+                          activeUserEmail
+                        )
+                      ) {
+                        syncShopRecordToFirestore(saved, false).catch((err) => {
+                          setLastSyncError(formatCloudSyncError(err));
+                        });
+                      }
                     }}
                     onLogout={handleLogoutUser}
                   />
@@ -1620,6 +1809,18 @@ function LoginScreenView({
     }
     setIsCheckingEmail(true);
     try {
+      if (
+        auth.currentUser?.emailVerified &&
+        isCloudSyncAuthorizedForEmail(auth.currentUser.email, clean)
+      ) {
+        const idToken = await auth.currentUser.getIdToken();
+        await syncCloudShopBeforeLoginInDb({
+          idToken,
+          shopId: shopId.trim() || undefined,
+          email: clean,
+        }).catch(() => {});
+      }
+
       const res = await verifyOwnerEmailInDb(clean);
       setEmailCheckResult(res);
       if (!res.validFormat || !res.registered) {
@@ -1640,7 +1841,7 @@ function LoginScreenView({
     setError('');
     setIsGoogleVerifying(true);
     try {
-      const cred = await signInWithGoogleFirebase();
+      const cred = await signInWithGoogleFirebase(ownerEmail.trim() || undefined);
       const verifiedEmail = (cred.user?.email || '').trim().toLowerCase();
       if (!verifiedEmail) {
         await signOutFirebase();
@@ -1648,18 +1849,26 @@ function LoginScreenView({
         return;
       }
 
-      // Pull latest shop PIN & details from Firestore if user already typed a Shop ID or owns a shop
-      const idToken = await cred.user.getIdToken();
-      await syncCloudShopBeforeLoginInDb({
-        idToken,
-        shopId: shopId.trim() || undefined,
-        email: verifiedEmail,
-      }).catch(() => {});
-
       const targetLookupEmail =
         verifiedEmail === SUPER_ADMIN_EMAIL && ownerEmail.trim()
           ? ownerEmail.trim().toLowerCase()
           : verifiedEmail;
+
+      // Pull latest shop record & PIN from Firestore using verified Google account
+      const idToken = await cred.user.getIdToken();
+      const primaryPull = await syncCloudShopBeforeLoginInDb({
+        idToken,
+        shopId: shopId.trim() || undefined,
+        email: verifiedEmail,
+      }).catch(() => ({ synced: false as const, cloudError: undefined }));
+
+      if (targetLookupEmail !== verifiedEmail) {
+        await syncCloudShopBeforeLoginInDb({
+          idToken,
+          shopId: shopId.trim() || undefined,
+          email: targetLookupEmail,
+        }).catch(() => {});
+      }
 
       const res = await verifyOwnerEmailInDb(targetLookupEmail);
       if (res.registered && res.isActive) {
@@ -1673,12 +1882,14 @@ function LoginScreenView({
       }
 
       if (verifiedEmail === SUPER_ADMIN_EMAIL) {
-        // Keep super-admin Google session connected for Demo Store (SB-1001) & multi-device sync
+        // Keep super-admin signed in, keep typed/verified email, and explain clearly if shop isn't in Cloud yet
+        setOwnerEmail(targetLookupEmail);
+        setEmailCheckResult(res);
         setGoogleVerifiedEmail(verifiedEmail);
-        if (!ownerEmail.trim()) {
-          setOwnerEmail('rajesh@quickmart.in');
-          setShopId((prev) => prev || 'SB-1001');
-        }
+        const extra = 'cloudError' in primaryPull && primaryPull.cloudError ? ` (${primaryPull.cloudError})` : '';
+        setError(
+          `Google verified (${verifiedEmail}), but no shop for "${targetLookupEmail}" was found in Cloud Firestore yet${extra}. On the laptop/device where you registered it, open Admin or Login with Google & click Sync Now so it uploads to Cloud.`
+        );
         return;
       }
 
@@ -1688,10 +1899,8 @@ function LoginScreenView({
       await signOutFirebase();
       setError(res.message);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Google verification failed.';
-      if (!msg.includes('popup-closed-by-user')) {
-        setError(msg);
-      }
+      const host = typeof window !== 'undefined' ? window.location.hostname : undefined;
+      setError(formatCloudSyncError(err, host));
     } finally {
       setIsGoogleVerifying(false);
     }
@@ -1770,10 +1979,10 @@ function LoginScreenView({
     } catch (err) {
       const msg = err instanceof Error ? err.message : '';
       const needsCloudHint =
-        !auth.currentUser && /incorrect|not found/i.test(msg);
+        !auth.currentUser && /incorrect|not found|not registered/i.test(msg);
       setError(
         needsCloudHint
-          ? `${msg} (If you updated your PIN on another device, click "Verify with Google" first to sync your latest PIN from Cloud.)`
+          ? `${msg} (If you registered or updated PIN on another device, tap "Verify with Google" below to sync from Cloud.)`
           : msg || 'Login failed.'
       );
     } finally {
@@ -1795,9 +2004,39 @@ function LoginScreenView({
       {/* Main Login Form */}
       <div className="max-w-xs mx-auto w-full my-auto space-y-3 py-2">
         {error && (
-          <div className="p-2.5 bg-red-50 border border-red-200 rounded-xl text-[11px] text-red-700 font-medium flex items-start gap-2 shadow-sm animate-shake">
-            <ShieldAlert className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
-            <div>{error}</div>
+          <div className="p-2.5 bg-red-50 border border-red-200 rounded-xl text-[11px] text-red-700 font-medium space-y-2 shadow-sm animate-shake">
+            <div className="flex items-start gap-2">
+              <ShieldAlert className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+              <div>{error}</div>
+            </div>
+            {(!googleVerifiedEmail || /not registered|not found|cloud firestore/i.test(error)) && (
+              <div className="flex flex-wrap gap-1.5 pl-6">
+                {!googleVerifiedEmail && (
+                  <button
+                    type="button"
+                    onClick={handleGoogleVerify}
+                    disabled={isGoogleVerifying}
+                    className="px-2.5 py-1 bg-sky-700 hover:bg-sky-800 text-white rounded-lg text-[10px] font-bold flex items-center gap-1"
+                  >
+                    <ShieldCheck className="w-3 h-3" />
+                    {isGoogleVerifying ? 'Syncing...' : 'Verify with Google & Sync'}
+                  </button>
+                )}
+                {googleVerifiedEmail === SUPER_ADMIN_EMAIL && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOwnerEmail('rajesh@quickmart.in');
+                      setShopId('SB-1001');
+                      setError('');
+                    }}
+                    className="px-2.5 py-1 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-[10px] font-bold"
+                  >
+                    Use Demo Store (SB-1001)
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -2027,6 +2266,8 @@ function HomeScreenView({
   shopProfile,
   currentUser,
   activeUserEmail,
+  activeOwnerEmail,
+  cloudUserEmail,
   employeesCount,
   bills,
   items,
@@ -2034,9 +2275,11 @@ function HomeScreenView({
   isSyncing,
   lastSyncedAt,
   autoSyncNotice,
+  lastSyncError,
   pendingSyncCount,
   hasCloudAuth,
   onSyncNow,
+  onSwitchGoogleAccount,
   onOpenEmployees,
   onOpenAuditLogs,
   onOpenBackup,
@@ -2049,6 +2292,8 @@ function HomeScreenView({
   shopProfile: { shopId?: string; name: string; currencySymbol: string };
   currentUser: UserProfile | null;
   activeUserEmail: string;
+  activeOwnerEmail: string;
+  cloudUserEmail: string | null;
   employeesCount: number;
   bills: BillRecord[];
   items: ShopItem[];
@@ -2056,9 +2301,11 @@ function HomeScreenView({
   isSyncing: boolean;
   lastSyncedAt: string | null;
   autoSyncNotice?: string | null;
+  lastSyncError?: string | null;
   pendingSyncCount: number;
   hasCloudAuth: boolean;
   onSyncNow: () => void;
+  onSwitchGoogleAccount: () => void;
   onOpenEmployees: () => void;
   onOpenAuditLogs: () => void;
   onOpenBackup: () => void;
@@ -2069,6 +2316,8 @@ function HomeScreenView({
   onSelectBill: (b: BillRecord) => void;
 }) {
   const isOwner = currentUser?.role !== 'employee';
+  const expectedSyncEmail = activeUserEmail || activeOwnerEmail;
+  const isWrongGoogleEmail = Boolean(cloudUserEmail && !hasCloudAuth);
   const todaySales = useMemo(() => {
     return bills.reduce((acc, b) => acc + b.grandTotal, 0);
   }, [bills]);
@@ -2112,19 +2361,24 @@ function HomeScreenView({
 
       {/* Offline SQLite & Cloud Sync Bar */}
       <div
+        data-testid="cloud-sync-bar"
         className={`px-4 py-2 border-b text-[11px] flex items-center justify-between gap-2 ${
           !isOnline
             ? 'bg-amber-50 border-amber-200 text-amber-900'
-            : pendingSyncCount > 0
-              ? 'bg-sky-50 border-sky-200 text-sky-900'
-              : 'bg-emerald-50 border-emerald-100 text-emerald-900'
+            : lastSyncError
+              ? 'bg-red-50 border-red-200 text-red-900'
+              : !hasCloudAuth
+                ? 'bg-amber-50 border-amber-200 text-amber-900'
+                : pendingSyncCount > 0
+                  ? 'bg-sky-50 border-sky-200 text-sky-900'
+                  : 'bg-emerald-50 border-emerald-100 text-emerald-900'
         }`}
       >
-        <div className="flex items-center gap-1.5 font-medium truncate">
+        <div className="flex items-center gap-1.5 font-medium min-w-0">
           {!isOnline ? (
             <>
               <WifiOff className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-              <span>
+              <span className="truncate">
                 Offline Mode • Saving in SQLite
                 {pendingSyncCount > 0 ? ` (${pendingSyncCount} pending)` : ''}
               </span>
@@ -2132,26 +2386,38 @@ function HomeScreenView({
           ) : isSyncing ? (
             <>
               <RefreshCw className="w-3.5 h-3.5 text-sky-600 animate-spin shrink-0" />
-              <span>Syncing SQLite records to Firestore...</span>
+              <span className="truncate">Syncing SQLite records to Firestore...</span>
+            </>
+          ) : lastSyncError ? (
+            <>
+              <ShieldAlert className="w-3.5 h-3.5 text-red-600 shrink-0" />
+              <span className="line-clamp-2">{lastSyncError}</span>
+            </>
+          ) : !hasCloudAuth ? (
+            <>
+              <CloudOff className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+              <span className="line-clamp-2">
+                {isWrongGoogleEmail
+                  ? `Wrong Gmail (${cloudUserEmail}) • Switch to ${expectedSyncEmail}`
+                  : pendingSyncCount > 0
+                    ? `${pendingSyncCount} SQLite change(s) pending • Sign in to Cloud`
+                    : `Local SQLite only • Sign in with Google (${expectedSyncEmail}) for Cloud Sync`}
+              </span>
             </>
           ) : autoSyncNotice ? (
             <>
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
-              <span>{autoSyncNotice}</span>
+              <span className="truncate">{autoSyncNotice}</span>
             </>
           ) : pendingSyncCount > 0 ? (
             <>
               <CloudOff className="w-3.5 h-3.5 text-sky-700 shrink-0" />
-              <span>
-                {hasCloudAuth
-                  ? `Auto-sync queued (${pendingSyncCount} bill(s))`
-                  : `${pendingSyncCount} SQLite bill(s) ready to sync`}
-              </span>
+              <span className="truncate">Auto-sync queued ({pendingSyncCount} pending)</span>
             </>
           ) : (
             <>
               <Wifi className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
-              <span>
+              <span className="truncate">
                 Online • Synced{lastSyncedAt ? ` (${fmtDate(lastSyncedAt)})` : ''}
               </span>
             </>
@@ -2160,10 +2426,20 @@ function HomeScreenView({
         {isOnline && !isSyncing && (
           <button
             type="button"
-            onClick={onSyncNow}
-            className="px-2 py-0.5 rounded bg-sky-700 hover:bg-sky-800 text-white font-bold text-[10px] shrink-0"
+            onClick={isWrongGoogleEmail ? onSwitchGoogleAccount : onSyncNow}
+            className={`px-2 py-0.5 rounded text-white font-bold text-[10px] shrink-0 ${
+              lastSyncError
+                ? 'bg-red-700 hover:bg-red-800'
+                : !hasCloudAuth
+                  ? 'bg-amber-700 hover:bg-amber-800'
+                  : 'bg-sky-700 hover:bg-sky-800'
+            }`}
           >
-            {hasCloudAuth || !isOwner ? 'Sync Now' : 'Sign In & Sync'}
+            {isWrongGoogleEmail
+              ? 'Switch Gmail'
+              : hasCloudAuth
+                ? 'Sync Now'
+                : 'Sign In & Sync'}
           </button>
         )}
       </div>
@@ -2364,6 +2640,12 @@ function HomeScreenView({
 function ItemsScreenView({
   items,
   canManage,
+  isOnline,
+  isSyncing,
+  hasCloudAuth,
+  pendingItemsCount,
+  lastSyncError,
+  onSyncNow,
   fmt,
   onBack,
   onAddItem,
@@ -2371,6 +2653,12 @@ function ItemsScreenView({
 }: {
   items: ShopItem[];
   canManage: boolean;
+  isOnline: boolean;
+  isSyncing: boolean;
+  hasCloudAuth: boolean;
+  pendingItemsCount: number;
+  lastSyncError?: string | null;
+  onSyncNow: () => void;
   fmt: (v: number) => string;
   onBack: () => void;
   onAddItem: () => void;
@@ -2401,15 +2689,35 @@ function ItemsScreenView({
             {canManage ? 'Items & Inventory' : 'Store Catalog (View Only)'}
           </h2>
         </div>
-        {canManage && (
-          <button
-            onClick={onAddItem}
-            className="p-1.5 bg-emerald-700 hover:bg-emerald-600 rounded-lg flex items-center gap-1 text-xs font-semibold"
-          >
-            <Plus className="w-4 h-4" /> Add
-          </button>
-        )}
+        <div className="flex items-center gap-1.5">
+          {pendingItemsCount > 0 && isOnline && (
+            <button
+              type="button"
+              onClick={onSyncNow}
+              disabled={isSyncing}
+              className="px-2 py-1 bg-sky-700 hover:bg-sky-600 rounded-lg text-[10px] font-bold flex items-center gap-1"
+            >
+              <RefreshCw className={`w-3 h-3 ${isSyncing ? 'animate-spin' : ''}`} />
+              {isSyncing ? 'Syncing' : hasCloudAuth ? `Sync (${pendingItemsCount})` : 'Connect & Sync'}
+            </button>
+          )}
+          {canManage && (
+            <button
+              onClick={onAddItem}
+              className="p-1.5 bg-emerald-700 hover:bg-emerald-600 rounded-lg flex items-center gap-1 text-xs font-semibold"
+            >
+              <Plus className="w-4 h-4" /> Add
+            </button>
+          )}
+        </div>
       </div>
+
+      {lastSyncError && (
+        <div className="px-3 py-2 bg-red-50 border-b border-red-200 text-[11px] text-red-800 font-medium flex items-center gap-1.5">
+          <ShieldAlert className="w-3.5 h-3.5 text-red-600 shrink-0" />
+          <span className="line-clamp-2">{lastSyncError}</span>
+        </div>
+      )}
 
       <div className="p-3 bg-white border-b border-slate-200 space-y-2 shrink-0">
         <div className="relative">
@@ -2451,13 +2759,22 @@ function ItemsScreenView({
             }`}
           >
             <div>
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1.5 flex-wrap">
                 <span className="font-bold text-xs text-slate-900">{item.name}</span>
                 {item.unit === 'kg' && (
                   <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 flex items-center gap-0.5">
                     <Scale className="w-2.5 h-2.5" /> kg/g
                   </span>
                 )}
+                <span
+                  className={`text-[9px] px-1.5 py-0.5 rounded font-bold ${
+                    item.syncStatus === 'synced'
+                      ? 'bg-sky-50 text-sky-700'
+                      : 'bg-amber-100 text-amber-800'
+                  }`}
+                >
+                  {item.syncStatus === 'synced' ? 'Synced' : 'Pending Sync'}
+                </span>
               </div>
               <div className="flex items-center gap-2 mt-1">
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">
@@ -3636,7 +3953,9 @@ function BillsScreenView({
   isSyncing,
   pendingSyncCount,
   hasCloudAuth,
+  lastSyncError,
   onSyncNow,
+  onSwitchGoogleAccount,
   fmt,
   fmtDate,
   onBack,
@@ -3647,7 +3966,9 @@ function BillsScreenView({
   isSyncing: boolean;
   pendingSyncCount: number;
   hasCloudAuth: boolean;
+  lastSyncError?: string | null;
   onSyncNow: () => void;
+  onSwitchGoogleAccount: () => void;
   fmt: (v: number) => string;
   fmtDate: (s: string) => string;
   onBack: () => void;
@@ -3676,7 +3997,7 @@ function BillsScreenView({
           </button>
           <h2 className="text-base font-bold">Bills History</h2>
         </div>
-        {pendingSyncCount > 0 && isOnline && (
+        {(pendingSyncCount > 0 || !hasCloudAuth) && isOnline && (
           <button
             type="button"
             onClick={onSyncNow}
@@ -3684,10 +4005,32 @@ function BillsScreenView({
             className="px-2.5 py-1 bg-emerald-700 hover:bg-emerald-600 rounded-lg text-[11px] font-bold flex items-center gap-1"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
-            {isSyncing ? 'Syncing...' : hasCloudAuth ? `Sync (${pendingSyncCount})` : 'Connect & Sync'}
+            {isSyncing
+              ? 'Syncing...'
+              : hasCloudAuth
+                ? `Sync (${pendingSyncCount})`
+                : 'Connect & Sync'}
           </button>
         )}
       </div>
+
+      {lastSyncError && (
+        <div className="px-3 py-2 bg-red-50 border-b border-red-200 text-[11px] text-red-800 font-medium flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <ShieldAlert className="w-3.5 h-3.5 text-red-600 shrink-0" />
+            <span className="line-clamp-2">{lastSyncError}</span>
+          </div>
+          {isOnline && (
+            <button
+              type="button"
+              onClick={onSwitchGoogleAccount}
+              className="px-2 py-0.5 bg-red-700 text-white rounded text-[10px] font-bold shrink-0"
+            >
+              Switch Gmail
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="p-3 bg-white border-b border-slate-200 space-y-2">
         <div className="relative">
@@ -4425,6 +4768,7 @@ function AdminPanelScreenView({
   cloudUserEmail,
   fmt,
   onConnectGoogle,
+  onSyncAllToCloud,
   onRefresh,
   onOpenAuditLogs,
   onRegisterOwner,
@@ -4438,7 +4782,8 @@ function AdminPanelScreenView({
   shopOwners: ShopOwnerRecord[];
   cloudUserEmail: string | null;
   fmt: (v: number) => string;
-  onConnectGoogle: () => Promise<void>;
+  onConnectGoogle: () => Promise<{ connected: boolean; synced: number; error?: string }>;
+  onSyncAllToCloud: () => Promise<{ synced: number; failed: number }>;
   onRefresh: () => Promise<void>;
   onOpenAuditLogs: () => Promise<void>;
   onRegisterOwner: (input: {
@@ -4449,7 +4794,7 @@ function AdminPanelScreenView({
     pin: string;
     address: string;
     gstin?: string;
-  }) => Promise<ApiShopRecord>;
+  }) => Promise<{ shop: ApiShopRecord; cloudSynced: boolean; syncError?: string }>;
   onUpdateOwner: (updated: any) => void;
   onResetOwnerPin: (id: string, newPin: string) => Promise<void>;
   onToggleStatus: (id: string) => Promise<void> | void;
@@ -4463,7 +4808,9 @@ function AdminPanelScreenView({
   const [resetPinValue, setResetPinValue] = useState('');
   const [resetPinError, setResetPinError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isSyncingAll, setIsSyncingAll] = useState(false);
   const [registerError, setRegisterError] = useState('');
+  const [adminNotice, setAdminNotice] = useState<string | null>(null);
 
   // Registration Form State
   const [newOwnerName, setNewOwnerName] = useState('');
@@ -4500,7 +4847,7 @@ function AdminPanelScreenView({
 
     setIsSubmitting(true);
     try {
-      await onRegisterOwner({
+      const result = await onRegisterOwner({
         ownerName: newOwnerName.trim(),
         shopName: newShopName.trim(),
         phone: newPhone.trim(),
@@ -4509,6 +4856,15 @@ function AdminPanelScreenView({
         address: newAddress.trim() || 'Main Market',
         gstin: newGstin.trim(),
       });
+
+      setAdminNotice(
+        result.cloudSynced
+          ? `Registered ${result.shop.shopId} (${result.shop.email}) & synced to Cloud Firestore!`
+          : result.syncError
+            ? `Registered ${result.shop.shopId} locally, but Cloud sync failed: ${result.syncError}`
+            : `Registered ${result.shop.shopId} locally. Click "Connect Google & Sync" above so Phone & other devices can log in!`
+      );
+      setTimeout(() => setAdminNotice(null), 7000);
 
       setShowRegisterModal(false);
       setNewOwnerName('');
@@ -4610,22 +4966,78 @@ function AdminPanelScreenView({
               Open Web App &rarr;
             </a>
           </div>
-          <div className="pt-2 border-t border-slate-800 flex items-center justify-between gap-2">
+          <div className="pt-2 border-t border-slate-800 flex items-center justify-between gap-2 flex-wrap">
             <div className="text-[10px] text-slate-300 flex items-center gap-1.5 truncate">
               <Cloud className="w-3.5 h-3.5 text-sky-400 shrink-0" />
               <span className="truncate">
-                {cloudUserEmail ? `Firestore Sync: ${cloudUserEmail}` : 'Firestore Sync: Sign in with Google'}
+                {cloudUserEmail ? `Firestore Sync: ${cloudUserEmail}` : 'Firestore Sync: Not connected (needed for Phone login)'}
               </span>
             </div>
-            <button
-              type="button"
-              onClick={() => onConnectGoogle().catch(() => {})}
-              className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 rounded-lg text-[10px] font-semibold shrink-0"
-            >
-              {cloudUserEmail ? 'Disconnect Google' : 'Connect Google'}
-            </button>
+            <div className="flex items-center gap-1.5 shrink-0">
+              {cloudUserEmail && (
+                <button
+                  type="button"
+                  disabled={isSyncingAll}
+                  onClick={async () => {
+                    setIsSyncingAll(true);
+                    try {
+                      const res = await onSyncAllToCloud();
+                      setAdminNotice(`Synced ${res.synced} shop(s) to Cloud Firestore${res.failed > 0 ? ` (${res.failed} failed)` : ''}.`);
+                      setTimeout(() => setAdminNotice(null), 5000);
+                    } finally {
+                      setIsSyncingAll(false);
+                    }
+                  }}
+                  className="px-2 py-1 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white rounded-lg text-[10px] font-bold"
+                >
+                  {isSyncingAll ? 'Syncing...' : 'Sync All to Cloud'}
+                </button>
+              )}
+              <button
+                type="button"
+                disabled={isSyncingAll}
+                onClick={async () => {
+                  setIsSyncingAll(true);
+                  try {
+                    const res = await onConnectGoogle();
+                    if (res.connected) {
+                      setAdminNotice(
+                        res.error
+                          ? `Google connected, synced ${res.synced} shop(s), with warning: ${res.error}`
+                          : `Google connected & ${res.synced} shop(s) synced to Cloud Firestore!`
+                      );
+                      setTimeout(() => setAdminNotice(null), 6000);
+                    }
+                  } catch (err) {
+                    const host = typeof window !== 'undefined' ? window.location.hostname : undefined;
+                    setAdminNotice(formatCloudSyncError(err, host));
+                    setTimeout(() => setAdminNotice(null), 7000);
+                  } finally {
+                    setIsSyncingAll(false);
+                  }
+                }}
+                className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 rounded-lg text-[10px] font-semibold"
+              >
+                {cloudUserEmail ? 'Disconnect Google' : 'Connect Google & Sync'}
+              </button>
+            </div>
           </div>
         </div>
+
+        {adminNotice && (
+          <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl text-[11px] text-emerald-900 font-medium flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>{adminNotice}</span>
+          </div>
+        )}
+
+        {!cloudUserEmail && (
+          <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-[11px] text-amber-900 font-medium flex items-center justify-between gap-2">
+            <span>
+              Connect Google above so newly registered shops upload to Cloud Firestore and work on Phone &amp; other devices.
+            </span>
+          </div>
+        )}
 
         {/* Actions & Search */}
         <div className="flex gap-2">

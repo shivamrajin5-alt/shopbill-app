@@ -405,7 +405,9 @@ async function createServer() {
       )}/databases/${encodeURIComponent(fbCfg.firestoreDatabaseId)}/documents`;
       const headers = { Authorization: `Bearer ${idToken}` };
 
-      let shopFields: Record<string, unknown> | null = null;
+      const candidateDocs: Array<Record<string, unknown>> = [];
+      let cloudError: string | undefined;
+
       if (requestedShopId) {
         const shopRes = await fetch(`${baseUrl}/shops/${encodeURIComponent(requestedShopId)}`, {
           headers,
@@ -415,10 +417,14 @@ async function createServer() {
             fields?: Record<string, Record<string, unknown>>;
           };
           if (shopDoc.fields) {
-            shopFields = readFirestoreFields(shopDoc.fields);
+            candidateDocs.push(readFirestoreFields(shopDoc.fields));
           }
+        } else if (shopRes.status !== 404) {
+          cloudError = `Firestore shop lookup failed (${shopRes.status})`;
         }
-      } else if (requestedEmail) {
+      }
+
+      if (requestedEmail && candidateDocs.length === 0) {
         const queryRes = await fetch(`${baseUrl}:runQuery`, {
           method: 'POST',
           headers: { ...headers, 'Content-Type': 'application/json' },
@@ -432,7 +438,7 @@ async function createServer() {
                   value: { stringValue: requestedEmail },
                 },
               },
-              limit: 1,
+              limit: 25,
             },
           }),
         });
@@ -440,64 +446,90 @@ async function createServer() {
           const rows = (await queryRes.json()) as Array<{
             document?: { fields?: Record<string, Record<string, unknown>> };
           }>;
-          const firstDoc = rows.find((r) => r.document?.fields)?.document;
-          if (firstDoc?.fields) {
-            shopFields = readFirestoreFields(firstDoc.fields);
+          for (const r of rows) {
+            if (r.document?.fields) {
+              candidateDocs.push(readFirestoreFields(r.document.fields));
+            }
           }
+        } else {
+          cloudError = `Firestore email query failed (${queryRes.status})`;
         }
       }
 
-      if (!shopFields || !shopFields.shopId || !shopFields.email) {
-        res.json({ synced: false });
+      if (candidateDocs.length === 0) {
+        res.json({ synced: false, syncedCount: 0, ...(cloudError ? { cloudError } : {}) });
         return;
       }
 
-      let ownerFields: Record<string, unknown> = {};
-      if (typeof shopFields.emailKey === 'string' && shopFields.emailKey) {
-        try {
-          const ownerRes = await fetch(
-            `${baseUrl}/shop_owners/${encodeURIComponent(shopFields.emailKey)}`,
-            { headers }
-          );
-          if (ownerRes.ok) {
-            const ownerDoc = (await ownerRes.json()) as {
-              fields?: Record<string, Record<string, unknown>>;
-            };
-            if (ownerDoc.fields) {
-              ownerFields = readFirestoreFields(ownerDoc.fields);
-            }
-          }
-        } catch (_) {}
-      }
-
-      const updatedShop = db.upsertShopFromVerifiedCloud({
-        shopId: String(shopFields.shopId),
-        email: String(shopFields.email),
-        emailKey: typeof shopFields.emailKey === 'string' ? shopFields.emailKey : undefined,
-        ownerUid: typeof shopFields.ownerUid === 'string' ? shopFields.ownerUid : undefined,
-        shopName: String(ownerFields.shopName || shopFields.shopName || 'BillKart Store'),
-        ownerName: String(ownerFields.ownerName || shopFields.ownerName || 'Owner'),
-        phone: String(ownerFields.phone ?? shopFields.phone ?? ''),
-        address: String(ownerFields.address ?? shopFields.address ?? ''),
-        gstin: String(ownerFields.gstin ?? shopFields.gstin ?? ''),
-        tagline: typeof ownerFields.tagline === 'string' ? ownerFields.tagline : undefined,
-        taxRatePercent:
-          typeof ownerFields.taxRatePercent === 'number' ? ownerFields.taxRatePercent : undefined,
-        currencySymbol:
-          typeof ownerFields.currencySymbol === 'string' ? ownerFields.currencySymbol : undefined,
-        pinHash: typeof shopFields.pinHash === 'string' ? shopFields.pinHash : undefined,
-        status: shopFields.status === 'inactive' ? 'inactive' : 'active',
-        isActive: shopFields.isActive !== false && shopFields.status !== 'inactive',
-        createdAt: typeof shopFields.createdAt === 'string' ? shopFields.createdAt : undefined,
-        updatedAt:
-          typeof shopFields.updatedAt === 'string'
-            ? shopFields.updatedAt
-            : typeof ownerFields.updatedAt === 'string'
-              ? ownerFields.updatedAt
-              : undefined,
+      candidateDocs.sort((a, b) => {
+        const aTime = new Date(String(a.updatedAt || a.createdAt || 0)).getTime() || 0;
+        const bTime = new Date(String(b.updatedAt || b.createdAt || 0)).getTime() || 0;
+        return bTime - aTime;
       });
 
-      res.json({ synced: Boolean(updatedShop), shop: updatedShop });
+      const syncedShops = [];
+      for (const shopFields of candidateDocs) {
+        if (!shopFields.shopId || !shopFields.email) continue;
+        let ownerFields: Record<string, unknown> = {};
+        if (typeof shopFields.emailKey === 'string' && shopFields.emailKey) {
+          try {
+            const ownerRes = await fetch(
+              `${baseUrl}/shop_owners/${encodeURIComponent(shopFields.emailKey)}`,
+              { headers }
+            );
+            if (ownerRes.ok) {
+              const ownerDoc = (await ownerRes.json()) as {
+                fields?: Record<string, Record<string, unknown>>;
+              };
+              if (ownerDoc.fields) {
+                ownerFields = readFirestoreFields(ownerDoc.fields);
+              }
+            }
+          } catch (_) {}
+        }
+
+        const updatedShop = db.upsertShopFromVerifiedCloud({
+          shopId: String(shopFields.shopId),
+          email: String(shopFields.email),
+          emailKey: typeof shopFields.emailKey === 'string' ? shopFields.emailKey : undefined,
+          ownerUid: typeof shopFields.ownerUid === 'string' ? shopFields.ownerUid : undefined,
+          shopName: String(ownerFields.shopName || shopFields.shopName || 'BillKart Store'),
+          ownerName: String(ownerFields.ownerName || shopFields.ownerName || 'Owner'),
+          phone: String(ownerFields.phone ?? shopFields.phone ?? ''),
+          address: String(ownerFields.address ?? shopFields.address ?? ''),
+          gstin: String(ownerFields.gstin ?? shopFields.gstin ?? ''),
+          tagline: typeof ownerFields.tagline === 'string' ? ownerFields.tagline : undefined,
+          taxRatePercent:
+            typeof ownerFields.taxRatePercent === 'number' ? ownerFields.taxRatePercent : undefined,
+          currencySymbol:
+            typeof ownerFields.currencySymbol === 'string' ? ownerFields.currencySymbol : undefined,
+          pinHash: typeof shopFields.pinHash === 'string' ? shopFields.pinHash : undefined,
+          status: shopFields.status === 'inactive' ? 'inactive' : 'active',
+          isActive: shopFields.isActive !== false && shopFields.status !== 'inactive',
+          createdAt: typeof shopFields.createdAt === 'string' ? shopFields.createdAt : undefined,
+          updatedAt:
+            typeof shopFields.updatedAt === 'string'
+              ? shopFields.updatedAt
+              : typeof ownerFields.updatedAt === 'string'
+                ? ownerFields.updatedAt
+                : undefined,
+        });
+        if (updatedShop) {
+          syncedShops.push(updatedShop);
+        }
+      }
+
+      const primaryShop =
+        (requestedShopId &&
+          syncedShops.find((s) => s.shopId.toUpperCase() === requestedShopId)) ||
+        syncedShops[0] ||
+        null;
+
+      res.json({
+        synced: Boolean(primaryShop),
+        syncedCount: syncedShops.length,
+        shop: primaryShop,
+      });
     } catch (err) {
       handleRouteError(res, err);
     }

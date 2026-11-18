@@ -592,8 +592,13 @@ export async function syncCloudShopBeforeLoginInDb(payload: {
   idToken: string;
   shopId?: string;
   email?: string;
-}): Promise<{ synced: boolean; shop?: ApiShopRecord }> {
-  return await requestJson<{ synced: boolean; shop?: ApiShopRecord }>('/api/auth/sync-cloud-shop', {
+}): Promise<{ synced: boolean; shop?: ApiShopRecord; syncedCount?: number; cloudError?: string }> {
+  return await requestJson<{
+    synced: boolean;
+    shop?: ApiShopRecord;
+    syncedCount?: number;
+    cloudError?: string;
+  }>('/api/auth/sync-cloud-shop', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${payload.idToken}`,
