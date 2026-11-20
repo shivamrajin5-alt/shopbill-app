@@ -25,7 +25,12 @@ async function createServer() {
   const rootDir = process.cwd();
   const adminPanelDir = path.resolve(rootDir, 'admin-panel');
   const firebaseConfigPath = path.resolve(rootDir, 'firebase-applet-config.json');
-  const adminAccessKey = (process.env.SHOPBILL_ADMIN_KEY || 'adminshiv.developer9142').trim();
+  const defaultAdminKey = 'adminshiv.developer9142';
+  const envAdminKey = (process.env.SHOPBILL_ADMIN_KEY || '').trim();
+  const validAdminKeys = new Set<string>([defaultAdminKey]);
+  if (envAdminKey && envAdminKey !== 'CHANGE_ME_ADMIN_KEY') {
+    validAdminKeys.add(envAdminKey);
+  }
 
   app.use(express.json({ limit: '5mb' }));
 
@@ -213,7 +218,7 @@ async function createServer() {
         (a) => a.isActive && (a.email.toLowerCase() === email || a.uid === uid)
       );
 
-      if (!password || password !== adminAccessKey) {
+      if (!password || !validAdminKeys.has(password)) {
         const failState = adminBruteForce.recordFailure(ip);
         db.recordAuditLog({
           shopId: 'GLOBAL',

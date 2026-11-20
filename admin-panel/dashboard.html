@@ -113,6 +113,36 @@
 
       <!-- Dashboard Body -->
       <div class="content-container">
+        <!-- Persistent Firebase Authorized Domain Configuration Guide -->
+        <div
+          id="firebaseConfigGuideAlert"
+          role="alert"
+          class="hidden"
+          style="margin-bottom:1.25rem;padding:1rem 1.15rem;border-radius:12px;border:2px solid #fca5a5;background:#fef2f2;color:#7f1d1d;"
+        >
+          <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:0.75rem;flex-wrap:wrap;margin-bottom:0.65rem;">
+            <div>
+              <strong style="font-size:0.95rem;color:#991b1b;display:block;">Configuration Guide: Firebase Authorized Domains</strong>
+              <p id="firebaseConfigGuideMsg" style="font-size:0.82rem;margin-top:0.2rem;color:#7f1d1d;"></p>
+            </div>
+            <span style="padding:0.2rem 0.55rem;border-radius:6px;background:#fee2e2;border:1px solid #fecaca;font-size:0.72rem;font-weight:700;color:#991b1b;">Action Required</span>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:0.75rem;flex-wrap:wrap;background:#ffffff;border:1px solid #fecaca;border-radius:8px;padding:0.6rem 0.8rem;margin-bottom:0.65rem;">
+            <div>
+              <div style="font-size:0.68rem;text-transform:uppercase;letter-spacing:0.04em;color:#64748b;font-weight:600;">Domain to authorize</div>
+              <code id="firebaseConfigGuideDomain" style="font-family:var(--font-mono);font-size:0.88rem;font-weight:700;color:#0f172a;"></code>
+            </div>
+            <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+              <button type="button" id="copyConfigDomainBtn" class="btn btn-sm" style="background:#0f172a;color:#ffffff;border:none;">Copy Domain</button>
+              <a id="openFirebaseConsoleLink" href="https://console.firebase.google.com/" target="_blank" rel="noopener noreferrer" class="btn btn-sm" style="background:#dc2626;color:#ffffff;text-decoration:none;">Open Firebase Console &nearr;</a>
+            </div>
+          </div>
+          <ol style="font-size:0.78rem;padding-left:1.15rem;color:#7f1d1d;line-height:1.5;">
+            <li>Open <strong>Firebase Console &rarr; Authentication &rarr; Settings &rarr; Authorized domains</strong>.</li>
+            <li>Click <strong>Add domain</strong> and paste the domain shown above.</li>
+          </ol>
+        </div>
+
         <!-- KPI Metric Cards -->
         <div class="metrics-grid">
           <div class="metric-card">
@@ -241,13 +271,63 @@
 
   <script type="module">
     import { requireAuth, logoutAdmin, getCurrentUser } from './js/auth.js';
+    import { firebaseConfig, auth } from './js/firebase-config.js';
     import { getAllShops, toggleShopStatus } from './js/shops.js';
     import { showToast, formatDate } from './js/utils.js';
+
+    function renderDomainConfigGuideIfNeeded() {
+      const box = document.getElementById('firebaseConfigGuideAlert');
+      if (!box) return;
+      const host = (window.location.hostname || 'localhost').trim().toLowerCase();
+      const isDefaultHost =
+        host === 'localhost' ||
+        host === '127.0.0.1' ||
+        host === '::1' ||
+        host.endsWith('.firebaseapp.com') ||
+        host.endsWith('.web.app') ||
+        host.endsWith('.run.app');
+      let recordedHost = '';
+      try {
+        recordedHost = (localStorage.getItem('shopbill_firebase_domain_error_v1') || '').trim().toLowerCase();
+      } catch (_) {}
+      const missingConfig = !firebaseConfig?.projectId || !firebaseConfig?.authDomain;
+      const hasAuthUser = Boolean(auth?.currentUser);
+      const misconfigured = missingConfig || recordedHost === host || (!isDefaultHost && !hasAuthUser);
+      if (!misconfigured) {
+        box.classList.add('hidden');
+        return;
+      }
+
+      const projectId = (firebaseConfig?.projectId || '').trim();
+      const consoleUrl = projectId
+        ? `https://console.firebase.google.com/project/${encodeURIComponent(projectId)}/authentication/settings`
+        : 'https://console.firebase.google.com/';
+
+      document.getElementById('firebaseConfigGuideDomain').textContent = host;
+      document.getElementById('openFirebaseConsoleLink').setAttribute('href', consoleUrl);
+      document.getElementById('firebaseConfigGuideMsg').textContent = missingConfig
+        ? 'Firebase projectId or authDomain is missing. Verify your Firebase config and authorized domains.'
+        : `Domain "${host}" must be listed under Firebase Authentication > Settings > Authorized domains for project "${projectId}".`;
+
+      const copyBtn = document.getElementById('copyConfigDomainBtn');
+      copyBtn.onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(host);
+          copyBtn.textContent = 'Copied!';
+          setTimeout(() => { copyBtn.textContent = 'Copy Domain'; }, 2500);
+        } catch (_) {
+          showToast('Copy domain manually: ' + host, 'info');
+        }
+      };
+
+      box.classList.remove('hidden');
+    }
 
     // Protect Page
     requireAuth(async (user) => {
       document.getElementById('adminEmailDisplay').textContent = user.email || 'Admin';
       document.getElementById('adminAvatar').textContent = (user.email || 'A')[0].toUpperCase();
+      renderDomainConfigGuideIfNeeded();
       loadDashboardData();
     });
 

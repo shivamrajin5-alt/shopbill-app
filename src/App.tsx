@@ -47,6 +47,7 @@ import {
   CloudOff,
   WifiOff,
   Wifi,
+  ExternalLink,
 } from 'lucide-react';
 import {
   ShopOwnerRecord,
@@ -56,6 +57,7 @@ import {
 } from './utils/admin';
 import {
   auth,
+  getFirebaseClientMeta,
   signInWithGoogleFirebase,
   signOutFirebase,
   syncShopRecordToFirestore,
@@ -64,6 +66,13 @@ import {
   exportFirestoreShopData,
   deleteItemFromFirestore,
 } from './firebase';
+import {
+  clearRecordedUnauthorizedDomainHost,
+  evaluateFirebaseDomainConfig,
+  getRecordedUnauthorizedDomainHost,
+  isUnauthorizedDomainError,
+  recordUnauthorizedDomainHost,
+} from './utils/firebaseDomainCheck';
 import {
   loginAdminInDb,
   logoutAdminInDb,
@@ -388,6 +397,9 @@ export default function App() {
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [autoSyncNotice, setAutoSyncNotice] = useState<string | null>(null);
   const [lastSyncError, setLastSyncError] = useState<string | null>(null);
+  const [domainErrorHost, setDomainErrorHost] = useState<string | null>(() =>
+    getRecordedUnauthorizedDomainHost()
+  );
   const activeOwnerEmailRef = useRef(activeOwnerEmail);
   activeOwnerEmailRef.current = activeOwnerEmail;
   const activeUserEmailRef = useRef(activeUserEmail);
@@ -571,6 +583,10 @@ export default function App() {
       }
     } catch (err) {
       const host = typeof window !== 'undefined' ? window.location.hostname : undefined;
+      if (isUnauthorizedDomainError(err) && host) {
+        recordUnauthorizedDomainHost(host);
+        setDomainErrorHost(host);
+      }
       const msg = formatCloudSyncError(err, host);
       setLastSyncError(msg);
       if (forceManual) {
@@ -634,6 +650,10 @@ export default function App() {
       await triggerCloudSync(activeOwnerEmail, isOnline, true, true);
     } catch (err) {
       const host = typeof window !== 'undefined' ? window.location.hostname : undefined;
+      if (isUnauthorizedDomainError(err) && host) {
+        recordUnauthorizedDomainHost(host);
+        setDomainErrorHost(host);
+      }
       const msg = formatCloudSyncError(err, host);
       setLastSyncError(msg);
       setAutoSyncNotice(msg);
@@ -644,6 +664,10 @@ export default function App() {
   useEffect(() => {
     const unsub = auth.onAuthStateChanged((u) => {
       setCloudUserEmail(u?.email ?? null);
+      if (u && typeof window !== 'undefined') {
+        clearRecordedUnauthorizedDomainHost(window.location.hostname);
+        setDomainErrorHost(null);
+      }
       const email = activeOwnerEmailRef.current;
       if (
         u &&
@@ -1028,6 +1052,7 @@ class Item {
                 {currentScreen === 'login' && (
                   <LoginScreenView
                     cloudUserEmail={cloudUserEmail}
+                    onUnauthorizedDomain={(host) => setDomainErrorHost(host)}
                     onLoginSuccess={async (user, shop, workspace, loggedUser) => {
                       setLastSyncError(null);
                       setAutoSyncNotice(null);
@@ -1111,13 +1136,27 @@ class Item {
                   <AdminPanelScreenView
                     shopOwners={shopOwners}
                     cloudUserEmail={cloudUserEmail}
+                    domainErrorHost={domainErrorHost}
                     fmt={fmt}
                     onConnectGoogle={async () => {
                       if (cloudUserEmail) {
                         await signOutFirebase();
                         return { connected: false, synced: 0, error: undefined };
                       }
-                      await signInWithGoogleFirebase(SUPER_ADMIN_EMAIL);
+                      try {
+                        await signInWithGoogleFirebase(SUPER_ADMIN_EMAIL);
+                        if (typeof window !== 'undefined') {
+                          clearRecordedUnauthorizedDomainHost(window.location.hostname);
+                        }
+                        setDomainErrorHost(null);
+                      } catch (err) {
+                        const host = typeof window !== 'undefined' ? window.location.hostname : undefined;
+                        if (isUnauthorizedDomainError(err) && host) {
+                          recordUnauthorizedDomainHost(host);
+                          setDomainErrorHost(host);
+                        }
+                        throw err;
+                      }
                       const freshShops = await fetchAllShops().catch(() => shopOwners);
                       if (freshShops.length > 0) setShopOwners(freshShops);
                       let synced = 0;
@@ -1759,10 +1798,12 @@ function SplashScreenView({ onStart }: { onStart: () => void }) {
 // SCREEN 2: LOGIN (GMAIL VERIFICATION + SHOP ID + PIN WITH RESTRICTED DEVELOPER GATEWAY)
 function LoginScreenView({
   cloudUserEmail,
+  onUnauthorizedDomain,
   onLoginSuccess,
   onOpenAdmin,
 }: {
   cloudUserEmail: string | null;
+  onUnauthorizedDomain: (host: string) => void;
   onLoginSuccess: (
     u: UserProfile,
     shop?: ShopOwnerRecord,
@@ -1785,6 +1826,7 @@ function LoginScreenView({
   // Developer Modal State (Opened via subtle footer key trigger)
   const [showDevModal, setShowDevModal] = useState(false);
   const [devPasswordInput, setDevPasswordInput] = useState('');
+  const [showDevPassword, setShowDevPassword] = useState(false);
   const [devModalError, setDevModalError] = useState('');
   const [devBusy, setDevBusy] = useState(false);
 
@@ -1908,6 +1950,10 @@ function LoginScreenView({
       setError(res.message);
     } catch (err) {
       const host = typeof window !== 'undefined' ? window.location.hostname : undefined;
+      if (isUnauthorizedDomainError(err) && host) {
+        recordUnauthorizedDomainHost(host);
+        onUnauthorizedDomain(host);
+      }
       setError(formatCloudSyncError(err, host));
     } finally {
       setIsGoogleVerifying(false);
@@ -2192,6 +2238,7 @@ function LoginScreenView({
               setShowDevModal(true);
               setDevModalError('');
               setDevPasswordInput('');
+              setShowDevPassword(false);
             }}
             className="hover:text-slate-600 transition p-0.5 rounded"
             title="Restricted Developer Admin Gateway"
@@ -2233,17 +2280,30 @@ function LoginScreenView({
             )}
 
             <form onSubmit={handleDevLogin} className="space-y-3">
-              <input
-                type="password"
-                value={devPasswordInput}
-                onChange={(e) => {
-                  setDevPasswordInput(e.target.value);
-                  setDevModalError('');
-                }}
-                placeholder="Enter developer key..."
-                autoFocus
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-xs text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
-              />
+              <div className="relative">
+                <input
+                  type={showDevPassword ? 'text' : 'password'}
+                  value={devPasswordInput}
+                  onChange={(e) => {
+                    setDevPasswordInput(e.target.value);
+                    setDevModalError('');
+                  }}
+                  placeholder="Enter developer key..."
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  autoFocus
+                  className="w-full px-3 py-2 pr-9 bg-slate-950 border border-slate-700 rounded-xl text-xs text-white font-mono focus:outline-none focus:ring-2 focus:ring-sky-500"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowDevPassword((prev) => !prev)}
+                  aria-label={showDevPassword ? 'Hide password' : 'Show password'}
+                  className="absolute right-2.5 top-2 text-slate-400 hover:text-white"
+                >
+                  {showDevPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
 
               <div className="flex gap-2 pt-1">
                 <button
@@ -4739,6 +4799,9 @@ function AdminLoginScreenView({
                 setError('');
               }}
               placeholder="Enter developer password"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
               className="w-full px-3.5 py-3 pr-10 border border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500 bg-slate-900 text-white font-mono text-sm"
             />
             <button
@@ -4787,6 +4850,7 @@ function AdminLoginScreenView({
 function AdminPanelScreenView({
   shopOwners,
   cloudUserEmail,
+  domainErrorHost,
   fmt,
   onConnectGoogle,
   onSyncAllToCloud,
@@ -4802,6 +4866,7 @@ function AdminPanelScreenView({
 }: {
   shopOwners: ShopOwnerRecord[];
   cloudUserEmail: string | null;
+  domainErrorHost: string | null;
   fmt: (v: number) => string;
   onConnectGoogle: () => Promise<{ connected: boolean; synced: number; error?: string }>;
   onSyncAllToCloud: () => Promise<{ synced: number; failed: number }>;
@@ -4832,6 +4897,41 @@ function AdminPanelScreenView({
   const [isSyncingAll, setIsSyncingAll] = useState(false);
   const [registerError, setRegisterError] = useState('');
   const [adminNotice, setAdminNotice] = useState<string | null>(null);
+  const [copiedDomain, setCopiedDomain] = useState(false);
+
+  const firebaseMeta = getFirebaseClientMeta();
+  const domainStatus = useMemo(
+    () =>
+      evaluateFirebaseDomainConfig({
+        hostname: typeof window !== 'undefined' ? window.location.hostname : 'localhost',
+        origin: typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000',
+        projectId: firebaseMeta.projectId,
+        authDomain: firebaseMeta.authDomain,
+        cloudUserEmail,
+        recordedErrorHost: domainErrorHost,
+      }),
+    [firebaseMeta.projectId, firebaseMeta.authDomain, cloudUserEmail, domainErrorHost]
+  );
+
+  const handleCopyDomain = async () => {
+    const textToCopy = domainStatus.domain;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(textToCopy);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = textToCopy;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setCopiedDomain(true);
+      setTimeout(() => setCopiedDomain(false), 2500);
+    } catch (_) {}
+  };
 
   // Registration Form State
   const [newOwnerName, setNewOwnerName] = useState('');
@@ -5044,6 +5144,95 @@ function AdminPanelScreenView({
             </div>
           </div>
         </div>
+
+        {domainStatus.misconfigured && (
+          <div
+            role="alert"
+            data-testid="firebase-config-guide-alert"
+            className="p-3.5 bg-red-50 border-2 border-red-300 rounded-xl text-red-950 shadow-sm space-y-2.5"
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-start gap-2">
+                <ShieldAlert className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                <div>
+                  <div className="text-xs font-extrabold text-red-900">
+                    Configuration Guide: Firebase Authorized Domains
+                  </div>
+                  <p className="text-[11px] text-red-800 mt-0.5 leading-snug">
+                    {domainStatus.message}
+                  </p>
+                </div>
+              </div>
+              <span className="px-2 py-0.5 bg-red-100 text-red-800 border border-red-200 rounded-md text-[10px] font-bold shrink-0">
+                Action Required
+              </span>
+            </div>
+
+            <div className="bg-white border border-red-200 rounded-lg p-2.5 flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                  Domain to authorize
+                </div>
+                <div className="font-mono text-xs font-bold text-slate-900 truncate select-all">
+                  {domainStatus.domain}
+                </div>
+                <div className="text-[10px] text-slate-400 truncate">
+                  Origin: {domainStatus.origin}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleCopyDomain}
+                className="px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-[11px] font-bold flex items-center gap-1.5 shrink-0 transition"
+              >
+                {copiedDomain ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Copied!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>Copy Domain</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            <ol className="text-[11px] text-red-900 space-y-1 list-decimal list-inside leading-snug">
+              <li>
+                Open <strong>Firebase Console &rarr; Authentication &rarr; Settings &rarr; Authorized domains</strong>.
+              </li>
+              <li>
+                Click <strong>Add domain</strong> and paste <code className="font-mono font-bold bg-red-100 px-1 rounded">{domainStatus.domain}</code>.
+              </li>
+              <li>
+                Return here and click <strong>Connect Google &amp; Sync</strong> above to verify.
+              </li>
+            </ol>
+
+            {domainStatus.usesDefaultAiStudioProject && domainStatus.reason === 'external_unverified_host' && (
+              <p className="text-[10px] text-red-800 bg-red-100/70 border border-red-200 rounded-lg p-2">
+                Note: This build currently points to project <code className="font-mono font-bold">{domainStatus.projectId}</code>. For external hosts (e.g. Render), set <code className="font-mono">VITE_FIREBASE_*</code> env vars to your own Firebase project if you do not manage <code className="font-mono">{domainStatus.projectId}</code>.
+              </p>
+            )}
+
+            <div className="flex items-center justify-between gap-2 pt-0.5 flex-wrap">
+              <span className="text-[10px] text-red-700 font-mono">
+                Project: {domainStatus.projectId || 'Not configured'}
+              </span>
+              <a
+                href={domainStatus.firebaseConsoleUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-[11px] font-bold inline-flex items-center gap-1.5 shadow-xs transition"
+              >
+                <span>Open Firebase Console</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            </div>
+          </div>
+        )}
 
         {adminNotice && (
           <div

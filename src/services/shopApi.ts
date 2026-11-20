@@ -163,10 +163,11 @@ export function getAdminSessionToken(): string {
 
 async function requestJson<T>(
   url: string,
-  options?: RequestInit & { useAdminToken?: boolean }
+  options?: RequestInit & { useAdminToken?: boolean; timeoutMs?: number }
 ): Promise<T> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8000);
+  const timeoutMs = options?.timeoutMs ?? (url.includes('/login') ? 25000 : 15000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   const ownerToken = getOwnerSessionToken();
   const adminToken = getAdminSessionToken();
   try {

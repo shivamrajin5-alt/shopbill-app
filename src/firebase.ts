@@ -84,6 +84,13 @@ export const db: Firestore = targetDatabaseId
   : getFirestore(app);
 export const auth = getAuth(app);
 
+export function getFirebaseClientMeta(): { projectId: string; authDomain: string } {
+  return {
+    projectId: String(resolvedFirebaseConfig.projectId || '').trim(),
+    authDomain: String(resolvedFirebaseConfig.authDomain || '').trim(),
+  };
+}
+
 export function handleFirestoreError(
   error: unknown,
   operationType: OperationType,

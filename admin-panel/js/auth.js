@@ -77,16 +77,29 @@ export async function loginAdmin(email, password) {
 export async function loginWithGoogle() {
   if (isLiveFirebase && auth) {
     const provider = new GoogleAuthProvider();
-    const result = await signInWithPopup(auth, provider);
-    const session = {
-      uid: result.user.uid,
-      email: result.user.email,
-      displayName: result.user.displayName || 'Admin',
-      role: 'super_admin',
-      loginAt: new Date().toISOString()
-    };
-    localStorage.setItem(ADMIN_SESSION_KEY, JSON.stringify(session));
-    return session;
+    try {
+      const result = await signInWithPopup(auth, provider);
+      try {
+        localStorage.removeItem('shopbill_firebase_domain_error_v1');
+      } catch (_) {}
+      const session = {
+        uid: result.user.uid,
+        email: result.user.email,
+        displayName: result.user.displayName || 'Admin',
+        role: 'super_admin',
+        loginAt: new Date().toISOString()
+      };
+      localStorage.setItem(ADMIN_SESSION_KEY, JSON.stringify(session));
+      return session;
+    } catch (err) {
+      const msg = String(err?.code || err?.message || '').toLowerCase();
+      if (msg.includes('unauthorized-domain') && typeof window !== 'undefined') {
+        try {
+          localStorage.setItem('shopbill_firebase_domain_error_v1', window.location.hostname.toLowerCase());
+        } catch (_) {}
+      }
+      throw err;
+    }
   }
   throw new Error('Firebase Auth is not active. Please sign in with your Admin Email and Developer Key.');
 }
