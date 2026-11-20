@@ -947,7 +947,7 @@ class Item {
   };
 
   return (
-    <div className="flex h-screen w-screen bg-slate-950 text-slate-100 font-sans overflow-hidden">
+    <div className="flex h-screen h-dvh w-screen bg-slate-950 text-slate-100 font-sans overflow-hidden">
       {/* Desktop Studio Top Header (Hidden in mobile/standalone PWA mode) */}
       {!isEdgeToEdgeMobile && (
         <div className="absolute top-0 left-0 right-0 h-14 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-6 z-50">
@@ -1335,7 +1335,8 @@ class Item {
                 {currentScreen === 'items' && (
                   <ItemsScreenView
                     items={items}
-                    canManage={currentUser?.role !== 'employee'}
+                    canAdd={true}
+                    canEdit={currentUser?.role !== 'employee'}
                     isOnline={isOnline}
                     isSyncing={isSyncing}
                     hasCloudAuth={hasMatchingCloudAuth}
@@ -1345,7 +1346,6 @@ class Item {
                     fmt={fmt}
                     onBack={() => navigateTo('home')}
                     onAddItem={() => {
-                      if (currentUser?.role === 'employee') return;
                       setEditingItem(null);
                       navigateTo('add_edit_item');
                     }}
@@ -1356,9 +1356,11 @@ class Item {
                     }}
                   />
                 )}
-                {currentScreen === 'add_edit_item' && currentUser?.role !== 'employee' && (
+                {currentScreen === 'add_edit_item' &&
+                  (currentUser?.role !== 'employee' || !editingItem) && (
                   <AddEditItemScreenView
                     item={editingItem}
+                    isEmployee={currentUser?.role === 'employee'}
                     fmt={fmt}
                     currencySymbol={shopProfile.currencySymbol}
                     onBack={() => navigateTo('items')}
@@ -1412,6 +1414,10 @@ class Item {
                     cashierName={currentUser?.name || 'Staff Cashier'}
                     fmt={fmt}
                     onBack={() => navigateTo('home')}
+                    onAddNewItem={() => {
+                      setEditingItem(null);
+                      navigateTo('add_edit_item');
+                    }}
                     onBillSaved={async (newBill) => {
                       const localPendingBill: BillRecord = { ...newBill, syncStatus: 'pending' };
                       setBills((prev) => [localPendingBill, ...prev]);
@@ -2254,7 +2260,7 @@ function LoginScreenView({
       {/* Hidden Developer Access Password Modal */}
       {showDevModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-xs p-4">
-          <div className="bg-slate-900 text-white rounded-2xl p-5 max-w-xs w-full shadow-2xl border border-slate-800 animate-in fade-in zoom-in-95">
+          <div className="bg-slate-900 text-white rounded-2xl p-5 max-w-xs w-full max-h-[90dvh] overflow-y-auto shadow-2xl border border-slate-800 animate-in fade-in zoom-in-95">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-3">
               <div className="flex items-center gap-2 text-sky-400 font-bold text-sm">
                 <ShieldCheck className="w-4 h-4 text-sky-400" />
@@ -2543,6 +2549,52 @@ function HomeScreenView({
           <ChevronRight className="w-5 h-5 text-emerald-200" />
         </div>
 
+        {/* Quick Primary Row: Add Item (Owner & Employee) + Items Catalog */}
+        <div className="grid grid-cols-2 gap-3">
+          <button
+            type="button"
+            onClick={() => onNavigate('add_edit_item')}
+            className="bg-white hover:bg-emerald-50 p-3.5 rounded-xl border-2 border-emerald-600 shadow-sm text-left transition flex items-center gap-2.5 active:scale-98"
+          >
+            <div className="w-9 h-9 bg-emerald-700 text-white rounded-lg flex items-center justify-center shrink-0 shadow-xs">
+              <Plus className="w-5 h-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-xs font-extrabold text-emerald-900">Add New Item</div>
+              <div className="text-[10px] text-emerald-700 truncate">Add pcs or kg/g product</div>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onNavigate('items')}
+            className="bg-white hover:border-emerald-500 p-3.5 rounded-xl border border-slate-200 shadow-sm text-left transition flex items-center gap-2.5"
+          >
+            <div className="w-9 h-9 bg-purple-100 text-purple-700 rounded-lg flex items-center justify-center shrink-0">
+              <Package className="w-5 h-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-xs font-bold text-slate-800">View Items</div>
+              <div className="text-[10px] text-slate-500 truncate">{items.length} in catalog</div>
+            </div>
+          </button>
+        </div>
+
+        {items.length === 0 && (
+          <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl flex items-center justify-between gap-2.5">
+            <div className="text-[11px] text-amber-900 font-medium leading-snug">
+              Your store has <strong>0 items</strong>. Tap <strong>Add New Item</strong> to add products before creating a bill.
+            </div>
+            <button
+              type="button"
+              onClick={() => onNavigate('add_edit_item')}
+              className="px-2.5 py-1.5 bg-amber-700 hover:bg-amber-800 text-white rounded-lg text-[10px] font-bold shrink-0 flex items-center gap-1"
+            >
+              <Plus className="w-3.5 h-3.5" /> Add Item
+            </button>
+          </div>
+        )}
+
         {/* Today's KPI row */}
         <div className="grid grid-cols-2 gap-3">
           <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-sm">
@@ -2553,7 +2605,7 @@ function HomeScreenView({
           <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-sm">
             <span className="text-xs text-slate-500 font-medium">Catalog Items</span>
             <div className="text-lg font-bold text-slate-900 mt-1">{items.length} Products</div>
-            <span className="text-[10px] text-amber-600 font-semibold">Includes kg & pcs</span>
+            <span className="text-[10px] text-amber-600 font-semibold">Includes kg &amp; pcs</span>
           </div>
         </div>
 
@@ -2571,7 +2623,7 @@ function HomeScreenView({
               <div>
                 <div className="text-xs font-bold text-slate-800">Items &amp; Stock</div>
                 <div className="text-[10px] text-slate-400">
-                  {isOwner ? `${items.length} products` : `${items.length} items (view)`}
+                  {isOwner ? `${items.length} products` : `${items.length} items (add/view)`}
                 </div>
               </div>
             </button>
@@ -2720,7 +2772,8 @@ function HomeScreenView({
 // SCREEN 4: ITEMS
 function ItemsScreenView({
   items,
-  canManage,
+  canAdd,
+  canEdit,
   isOnline,
   isSyncing,
   hasCloudAuth,
@@ -2733,7 +2786,8 @@ function ItemsScreenView({
   onEditItem,
 }: {
   items: ShopItem[];
-  canManage: boolean;
+  canAdd: boolean;
+  canEdit: boolean;
   isOnline: boolean;
   isSyncing: boolean;
   hasCloudAuth: boolean;
@@ -2761,16 +2815,16 @@ function ItemsScreenView({
 
   return (
     <div className="h-full flex flex-col bg-slate-100">
-      <div className="bg-emerald-800 text-white p-4 shadow-sm shrink-0 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <button onClick={onBack} className="p-1 hover:bg-emerald-700 rounded-full">
+      <div className="bg-emerald-800 text-white p-4 shadow-sm shrink-0 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <button onClick={onBack} className="p-1 hover:bg-emerald-700 rounded-full shrink-0">
             <ArrowLeft className="w-5 h-5" />
           </button>
-          <h2 className="text-base font-bold">
-            {canManage ? 'Items & Inventory' : 'Store Catalog (View Only)'}
+          <h2 className="text-base font-bold truncate">
+            {canEdit ? 'Items & Inventory' : 'Items & Stock (Add & View)'}
           </h2>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 shrink-0">
           {pendingItemsCount > 0 && isOnline && (
             <button
               type="button"
@@ -2782,16 +2836,23 @@ function ItemsScreenView({
               {isSyncing ? 'Syncing' : hasCloudAuth ? `Sync (${pendingItemsCount})` : 'Connect & Sync'}
             </button>
           )}
-          {canManage && (
+          {canAdd && (
             <button
+              type="button"
               onClick={onAddItem}
-              className="p-1.5 bg-emerald-700 hover:bg-emerald-600 rounded-lg flex items-center gap-1 text-xs font-semibold"
+              className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg flex items-center gap-1 text-xs font-bold shadow-xs"
             >
-              <Plus className="w-4 h-4" /> Add
+              <Plus className="w-4 h-4" /> Add Item
             </button>
           )}
         </div>
       </div>
+
+      {!canEdit && (
+        <div className="px-3 py-2 bg-sky-50 border-b border-sky-200 text-[11px] text-sky-900 font-medium">
+          Staff access: Tap <strong>+ Add Item</strong> to add new products. Only the shop owner can edit or delete existing items.
+        </div>
+      )}
 
       {lastSyncError && (
         <div className="px-3 py-2 bg-red-50 border-b border-red-200 text-[11px] text-red-800 font-medium flex items-center gap-1.5">
@@ -2829,58 +2890,85 @@ function ItemsScreenView({
       </div>
 
       <div className="flex-1 overflow-y-auto p-3 space-y-2">
-        {filtered.map((item) => (
-          <div
-            key={item.id}
-            onClick={() => {
-              if (canManage) onEditItem(item);
-            }}
-            className={`bg-white p-3 rounded-xl border border-slate-200 shadow-sm flex items-center justify-between transition ${
-              canManage ? 'hover:border-emerald-500 cursor-pointer' : ''
-            }`}
-          >
+        {filtered.length === 0 ? (
+          <div className="bg-white border border-slate-200 rounded-2xl p-6 text-center space-y-3 my-4 shadow-xs">
+            <div className="w-12 h-12 bg-emerald-100 text-emerald-700 rounded-full flex items-center justify-center mx-auto">
+              <Package className="w-6 h-6" />
+            </div>
             <div>
-              <div className="flex items-center gap-1.5 flex-wrap">
-                <span className="font-bold text-xs text-slate-900">{item.name}</span>
-                {item.unit === 'kg' && (
-                  <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 flex items-center gap-0.5">
-                    <Scale className="w-2.5 h-2.5" /> kg/g
+              <h3 className="text-sm font-bold text-slate-900">
+                {items.length === 0 ? 'No Items in Catalog Yet' : 'No Matching Items'}
+              </h3>
+              <p className="text-xs text-slate-500 mt-1">
+                {items.length === 0
+                  ? 'Add products with price, stock, and unit (pcs or kg/g) to start billing.'
+                  : 'Try another search or add a new item directly.'}
+              </p>
+            </div>
+            {canAdd && (
+              <button
+                type="button"
+                onClick={onAddItem}
+                className="px-4 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 shadow-sm"
+              >
+                <Plus className="w-4 h-4" /> Add New Item
+              </button>
+            )}
+          </div>
+        ) : (
+          filtered.map((item) => (
+            <div
+              key={item.id}
+              onClick={() => {
+                if (canEdit) onEditItem(item);
+              }}
+              className={`bg-white p-3 rounded-xl border border-slate-200 shadow-sm flex items-center justify-between transition ${
+                canEdit ? 'hover:border-emerald-500 cursor-pointer' : ''
+              }`}
+            >
+              <div>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="font-bold text-xs text-slate-900">{item.name}</span>
+                  {item.unit === 'kg' && (
+                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 flex items-center gap-0.5">
+                      <Scale className="w-2.5 h-2.5" /> kg/g
+                    </span>
+                  )}
+                  <span
+                    className={`text-[9px] px-1.5 py-0.5 rounded font-bold ${
+                      item.syncStatus === 'synced'
+                        ? 'bg-sky-50 text-sky-700'
+                        : 'bg-amber-100 text-amber-800'
+                    }`}
+                  >
+                    {item.syncStatus === 'synced' ? 'Synced' : 'Pending Sync'}
                   </span>
-                )}
-                <span
-                  className={`text-[9px] px-1.5 py-0.5 rounded font-bold ${
-                    item.syncStatus === 'synced'
-                      ? 'bg-sky-50 text-sky-700'
-                      : 'bg-amber-100 text-amber-800'
+                </div>
+                <div className="flex items-center gap-2 mt-1">
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">
+                    {item.code}
+                  </span>
+                  <span className="text-[10px] text-slate-400">{item.category}</span>
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="font-bold text-sm text-emerald-800">
+                  {fmt(item.price)}
+                  <span className="text-[10px] font-normal text-slate-500 ml-0.5">
+                    {item.unit === 'kg' ? '/kg' : '/pc'}
+                  </span>
+                </div>
+                <div
+                  className={`text-[10px] font-semibold ${
+                    item.stock <= 15 ? 'text-red-600' : 'text-slate-500'
                   }`}
                 >
-                  {item.syncStatus === 'synced' ? 'Synced' : 'Pending Sync'}
-                </span>
-              </div>
-              <div className="flex items-center gap-2 mt-1">
-                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">
-                  {item.code}
-                </span>
-                <span className="text-[10px] text-slate-400">{item.category}</span>
+                  Stock: {item.stock} {item.unit}
+                </div>
               </div>
             </div>
-            <div className="text-right">
-              <div className="font-bold text-sm text-emerald-800">
-                {fmt(item.price)}
-                <span className="text-[10px] font-normal text-slate-500 ml-0.5">
-                  {item.unit === 'kg' ? '/kg' : '/pc'}
-                </span>
-              </div>
-              <div
-                className={`text-[10px] font-semibold ${
-                  item.stock <= 15 ? 'text-red-600' : 'text-slate-500'
-                }`}
-              >
-                Stock: {item.stock} {item.unit}
-              </div>
-            </div>
-          </div>
-        ))}
+          ))
+        )}
       </div>
     </div>
   );
@@ -2889,13 +2977,15 @@ function ItemsScreenView({
 // SCREEN 5: ADD / EDIT ITEM
 function AddEditItemScreenView({
   item,
-  fmt,
+  isEmployee = false,
+  fmt: _fmt,
   currencySymbol,
   onBack,
   onSave,
   onDelete,
 }: {
   item: ShopItem | null;
+  isEmployee?: boolean;
   fmt: (v: number) => string;
   currencySymbol: string;
   onBack: () => void;
@@ -2908,17 +2998,26 @@ function AddEditItemScreenView({
   const [stock, setStock] = useState(item ? item.stock.toString() : '50');
   const [category, setCategory] = useState(item?.category || 'Groceries');
   const [unit, setUnit] = useState<ItemUnit>(item?.unit || 'pcs');
+  const [formError, setFormError] = useState('');
 
   const categories = ['Groceries', 'Beverages', 'Dairy', 'Bakery', 'Cleaning', 'Personal Care', 'Snacks'];
 
   const handleSave = () => {
-    if (!name.trim()) return;
-    const parsedPrice = parseFloat(price) || 0;
-    const parsedStock = parseFloat(stock) || 0;
+    setFormError('');
+    if (!name.trim()) {
+      setFormError('Please enter the item name.');
+      return;
+    }
+    const parsedPrice = parseFloat(price);
+    if (Number.isNaN(parsedPrice) || parsedPrice < 0) {
+      setFormError('Please enter a valid price (0 or more).');
+      return;
+    }
+    const parsedStock = Math.max(0, parseFloat(stock) || 0);
     onSave({
       id: item?.id || `i_${Date.now()}`,
       name: name.trim(),
-      code: code.trim(),
+      code: code.trim() || `SKU-${Math.floor(100 + Math.random() * 900)}`,
       price: parsedPrice,
       stock: parsedStock,
       category,
@@ -2933,9 +3032,14 @@ function AddEditItemScreenView({
           <button onClick={onBack} className="p-1 hover:bg-emerald-700 rounded-full">
             <ArrowLeft className="w-5 h-5" />
           </button>
-          <h2 className="text-base font-bold">{item ? 'Edit Item' : 'Add New Item'}</h2>
+          <div>
+            <h2 className="text-base font-bold">{item ? 'Edit Item' : 'Add New Item'}</h2>
+            {isEmployee && !item && (
+              <p className="text-[10px] text-emerald-200">Adding to store catalog as Staff</p>
+            )}
+          </div>
         </div>
-        {item && (
+        {item && !isEmployee && (
           <button
             onClick={() => onDelete(item.id)}
             className="p-1.5 text-red-200 hover:text-red-100 hover:bg-red-800/40 rounded-lg"
@@ -2946,12 +3050,21 @@ function AddEditItemScreenView({
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 space-y-3">
+        {formError && (
+          <div className="p-2.5 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 font-medium flex items-center gap-1.5">
+            <ShieldAlert className="w-4 h-4 text-red-600 shrink-0" />
+            <span>{formError}</span>
+          </div>
+        )}
         <div>
           <label className="text-xs font-semibold text-slate-700 block mb-1">Item Name *</label>
           <input
             type="text"
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => {
+              setName(e.target.value);
+              setFormError('');
+            }}
             placeholder={unit === 'kg' ? 'e.g. Basmati Rice, Sugar' : 'e.g. Milk Bread 400g'}
             className="w-full px-3 py-2 bg-white rounded-xl text-xs border border-slate-300 focus:outline-none focus:ring-2 focus:ring-emerald-600"
           />
@@ -3061,6 +3174,7 @@ function NewBillScreenView({
   cashierName,
   fmt,
   onBack,
+  onAddNewItem,
   onBillSaved,
 }: {
   items: ShopItem[];
@@ -3069,6 +3183,7 @@ function NewBillScreenView({
   cashierName: string;
   fmt: (v: number) => string;
   onBack: () => void;
+  onAddNewItem?: () => void;
   onBillSaved: (b: BillRecord) => void;
 }) {
   const [billItems, setBillItems] = useState<BillItemEntry[]>([]);
@@ -3230,16 +3345,33 @@ function NewBillScreenView({
       {/* Line Items List */}
       <div className="flex-1 overflow-y-auto p-3 space-y-2">
         {billItems.length === 0 ? (
-          <div className="text-center py-16 text-slate-400">
-            <ShoppingCart className="w-12 h-12 mx-auto mb-3 opacity-30 text-slate-500" />
+          <div className="text-center py-14 text-slate-400 space-y-2.5">
+            <ShoppingCart className="w-12 h-12 mx-auto opacity-30 text-slate-500" />
             <p className="text-xs font-medium">Bill is currently empty</p>
-            <p className="text-[11px] text-slate-400 mt-1">Tap below to add items with quantity or weight</p>
-            <button
-              onClick={() => setIsPickerOpen(true)}
-              className="mt-3 px-4 py-2 bg-emerald-700 text-white text-xs font-semibold rounded-xl shadow-sm"
-            >
-              Browse Catalog
-            </button>
+            <p className="text-[11px] text-slate-400">
+              {items.length === 0
+                ? 'No catalog items yet. Add your first item to start billing.'
+                : 'Tap below to add items with quantity or weight'}
+            </p>
+            <div className="flex items-center justify-center gap-2 pt-1 flex-wrap">
+              {items.length > 0 && (
+                <button
+                  onClick={() => setIsPickerOpen(true)}
+                  className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold rounded-xl shadow-sm"
+                >
+                  Browse Catalog
+                </button>
+              )}
+              {onAddNewItem && (
+                <button
+                  type="button"
+                  onClick={onAddNewItem}
+                  className="px-4 py-2 bg-white hover:bg-emerald-50 text-emerald-800 border-2 border-emerald-600 text-xs font-bold rounded-xl shadow-xs inline-flex items-center gap-1"
+                >
+                  <Plus className="w-3.5 h-3.5" /> Add New Item
+                </button>
+              )}
+            </div>
           </div>
         ) : (
           billItems.map((bi, idx) => (
@@ -3468,51 +3600,69 @@ function NewBillScreenView({
             </div>
 
             <div className="flex-1 overflow-y-auto p-3 space-y-2">
-              {items
-                .filter(
-                  (i) =>
-                    searchQuery === '' ||
-                    i.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                    i.code.toLowerCase().includes(searchQuery.toLowerCase())
-                )
-                .map((itm) => {
-                  const existing = billItems.find((bi) => bi.itemId === itm.id);
-                  return (
-                    <div
-                      key={itm.id}
+              {items.length === 0 ? (
+                <div className="text-center py-8 space-y-3">
+                  <p className="text-xs text-slate-500">Your store catalog has 0 items.</p>
+                  {onAddNewItem && (
+                    <button
+                      type="button"
                       onClick={() => {
                         setIsPickerOpen(false);
-                        openItemPrompt(itm, existing);
+                        onAddNewItem();
                       }}
-                      className="p-2.5 rounded-xl border border-slate-200 hover:border-emerald-500 flex items-center justify-between cursor-pointer hover:bg-emerald-50/50 transition"
+                      className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5"
                     >
-                      <div>
-                        <div className="flex items-center gap-1.5">
-                          <span className="font-bold text-xs text-slate-800">{itm.name}</span>
-                          {itm.unit === 'kg' && (
-                            <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-amber-100 text-amber-900">
-                              kg / g
+                      <Plus className="w-4 h-4" /> Add First Item
+                    </button>
+                  )}
+                </div>
+              ) : (
+                items
+                  .filter(
+                    (i) =>
+                      searchQuery === '' ||
+                      i.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                      i.code.toLowerCase().includes(searchQuery.toLowerCase())
+                  )
+                  .map((itm) => {
+                    const existing = billItems.find((bi) => bi.itemId === itm.id);
+                    return (
+                      <div
+                        key={itm.id}
+                        onClick={() => {
+                          setIsPickerOpen(false);
+                          openItemPrompt(itm, existing);
+                        }}
+                        className="p-2.5 rounded-xl border border-slate-200 hover:border-emerald-500 flex items-center justify-between cursor-pointer hover:bg-emerald-50/50 transition"
+                      >
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-bold text-xs text-slate-800">{itm.name}</span>
+                            {itm.unit === 'kg' && (
+                              <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-amber-100 text-amber-900">
+                                kg / g
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[10px] text-slate-400">
+                            Code: {itm.code} • Stock: {itm.stock} {itm.unit}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-xs text-emerald-800">
+                            {fmt(itm.price)}
+                            <span className="text-[10px] text-slate-400 font-normal">
+                              {itm.unit === 'kg' ? '/kg' : '/pc'}
                             </span>
-                          )}
-                        </div>
-                        <div className="text-[10px] text-slate-400">
-                          Code: {itm.code} • Stock: {itm.stock} {itm.unit}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold text-xs text-emerald-800">
-                          {fmt(itm.price)}
-                          <span className="text-[10px] text-slate-400 font-normal">
-                            {itm.unit === 'kg' ? '/kg' : '/pc'}
                           </span>
-                        </span>
-                        <button className="px-2 py-1 rounded-lg bg-emerald-100 text-emerald-800 text-xs font-bold hover:bg-emerald-200">
-                          {existing ? formatQtyDisplay(existing.quantity, existing.unit) : '+ Select'}
-                        </button>
+                          <button className="px-2 py-1 rounded-lg bg-emerald-100 text-emerald-800 text-xs font-bold hover:bg-emerald-200">
+                            {existing ? formatQtyDisplay(existing.quantity, existing.unit) : '+ Select'}
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                  );
-                })}
+                    );
+                  })
+              )}
             </div>
 
             <div className="p-3 border-t border-slate-200">

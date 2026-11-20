@@ -598,4 +598,63 @@ test('newly registered shop on Laptop syncs to fresh Phone SQLite DB via upsertS
   }
 });
 
+test('allows both shop owner and active employee to create new catalog items with audit tracking', () => {
+  const db = openShopBillDatabase(':memory:');
+  try {
+    const owner = db.registerShop({
+      shopId: 'SB-1105',
+      shopName: 'Kaveri Kirana',
+      ownerName: 'Ramesh Verma',
+      email: 'ramesh@kaverikirana.in',
+      phone: '9876543210',
+      address: 'MG Road',
+      pin: '1234',
+    });
+
+    const ownerAdded = db.saveOwnerItem(
+      owner.email,
+      {
+        id: 'item_owner_1',
+        name: 'Owner Sugar 1kg',
+        code: 'OS01',
+        price: 48,
+        stock: 25,
+        category: 'Groceries',
+        unit: 'kg',
+      },
+      { email: owner.email, role: 'owner' }
+    );
+    assert.equal(ownerAdded.name, 'Owner Sugar 1kg');
+
+    const staffAdded = db.saveOwnerItem(
+      owner.email,
+      {
+        id: 'item_staff_1',
+        name: 'Staff Biscuits Pack',
+        code: 'SB01',
+        price: 20,
+        stock: 40,
+        category: 'Snacks',
+        unit: 'pcs',
+      },
+      { email: 'sunil@kaverikirana.in', role: 'employee' }
+    );
+    assert.equal(staffAdded.name, 'Staff Biscuits Pack');
+
+    const workspace = db.getOwnerWorkspace(owner.email);
+    assert.ok(workspace);
+    assert.equal(workspace.items.length, 2);
+    const logs = db.listAuditLogsForShop(owner.shopId);
+    const staffLog = logs.find(
+      (log) => log.actorRole === 'employee' && log.targetId === 'item_staff_1'
+    );
+    assert.ok(staffLog);
+    assert.equal(staffLog.actorEmail, 'sunil@kaverikirana.in');
+    assert.equal(staffLog.action, 'item_created');
+  } finally {
+    db.close();
+  }
+});
+
+
 

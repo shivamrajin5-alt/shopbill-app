@@ -750,10 +750,22 @@ async function createServer() {
     }
   });
 
-  // Items: Owners can create/edit/delete; Employees can read workspace items (stock updates happen on bill creation)
-  app.post('/api/owners/:email/items', requireShopOwner, (req, res) => {
+  // Items: Owners can create/edit/delete; Employees can add new items & read workspace items
+  app.post('/api/owners/:email/items', requireShopMember, (req, res) => {
     try {
       const email = decodeURIComponent(req.params.email);
+      if (req.ownerSession?.role === 'employee') {
+        const incomingId = String(req.body?.id || '').trim();
+        const workspace = db.getOwnerWorkspace(email);
+        const alreadyExists =
+          Boolean(incomingId) && Boolean(workspace?.items?.some((it) => it.id === incomingId));
+        if (alreadyExists) {
+          res.status(403).json({
+            error: 'Only the shop owner can edit existing catalog items. Employees can add new items.',
+          });
+          return;
+        }
+      }
       const item = db.saveOwnerItem(email, req.body || {}, {
         uid: req.ownerSession?.actorUid,
         email: req.ownerSession?.actorEmail,
